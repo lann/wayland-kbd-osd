@@ -10,3 +10,6 @@ wayland-protocols = { version = "0.31.2", features = ["client", "unstable"] }
 tempfile = "3.10.1"
 memmap2 = "0.9.4"
 env_logger = "0.11.3"
+raqote = "0.8.5"
+rusttype = "0.9.3"
+euclid = "0.22.11" # For Angle
