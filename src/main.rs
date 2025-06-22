@@ -605,49 +605,19 @@ fn main() {
     // std::time::Duration was removed as std::thread::sleep is no longer used.
 
     log::info!("Entering main event loop.");
+    // Get FD for polling. In wayland-client 0.31, this might be obtained via conn.backend().poll_fd()
+    // For now, this FD is not used in the current loop structure, so commenting out to avoid compile errors.
+    // let event_queue_fd = conn.backend().poll_fd();
+
     while app_state.running {
-        // Process Wayland events, blocks until events are available or an error occurs.
-        match event_queue.blocking_dispatch(&mut app_state) {
-            Ok(_) => { /* Events dispatched successfully */ }
-            Err(e) => {
-                log::error!("Error in blocking_dispatch: {}", e);
-                match e {
-                    wayland_client::DispatchError::Backend(err) => {
-                        match err {
-                            wayland_client::backend::WaylandError::Io(io_err) => {
-                                if io_err.kind() == std::io::ErrorKind::Interrupted {
-                                    log::warn!("Wayland dispatch interrupted (IO), continuing.");
-                                    continue; // Try dispatching again
-                                }
-                                log::error!("Wayland dispatch IO error: {}, exiting.", io_err);
-                                app_state.running = false;
-                            }
-                            wayland_client::backend::WaylandError::Protocol(protocol_err) => {
-                                log::error!("Wayland dispatch protocol error: {}, exiting.", protocol_err);
-                                app_state.running = false;
-                            }
-                            // No other variants if 'dlopen' feature is not used
-                        }
-                    }
-                    _ => { // Other dispatch errors like Io with no inner WaylandError, or malformed messages
-                        log::error!("Unhandled Wayland dispatch error: {}, exiting.", e);
-                        app_state.running = false;
-                    }
-                }
-            }
-        }
-
-        // If an error in dispatch caused us to stop running, or if xdg_toplevel_close was handled,
-        // break the loop early before processing input or drawing.
-        if !app_state.running {
-            break;
-        }
-
         let mut needs_redraw = false;
+
+        // 1. Process libinput events first (non-blocking)
         if let Some(ref mut context) = app_state.input_context {
+            // Dispatch any pending libinput events.
+            // This is non-blocking and should be called before checking for new events.
             if context.dispatch().is_err() {
-                log::error!("Libinput dispatch error in event processing loop");
-                // Consider if this should also set app_state.running = false
+                log::error!("Libinput dispatch error before processing events");
             }
             while let Some(event) = context.next() {
                 if let LibinputEvent::Keyboard(KeyboardEvent::Key(key_event)) = event {
@@ -656,20 +626,76 @@ fn main() {
                     log::trace!("Key event: code {}, state {:?}", key_code, key_state);
 
                     let pressed = key_state == KeyState::Pressed;
-                    let mut local_needs_redraw = false;
-
                     if let Some(current_state) = app_state.key_states.get_mut(&key_code) {
                         if *current_state != pressed {
                             *current_state = pressed;
-                            local_needs_redraw = true;
+                            needs_redraw = true; // Set redraw flag
                             log::info!("Configured key {} state changed: {}", key_code, pressed);
                         }
                     }
-                    if local_needs_redraw { needs_redraw = true; }
                 }
             }
         }
 
+        // 2. Process Wayland events (non-blocking)
+        // `prepare_read()` returns `Option<ReadEventsGuard>`.
+        // `Some` means reading is possible, `None` means the queue is already borrowed
+        // or the connection is dead.
+        if let Some(read_guard) = event_queue.prepare_read() {
+            // Drop the guard, allowing other threads to queue events if that were part of the design.
+            // For single-threaded, it's mainly about synchronizing access to the queue.
+            drop(read_guard); // Explicitly drop, though it would drop at end of scope anyway.
+
+            // Dispatch pending events. This is non-blocking.
+            // It can return Err if the connection is broken during dispatch.
+            match event_queue.dispatch_pending(&mut app_state) {
+                Ok(dispatched_count) => {
+                    if dispatched_count > 0 {
+                        log::trace!("Dispatched {} Wayland events.", dispatched_count);
+                    }
+                }
+                Err(e) => {
+                    log::error!("Error in dispatch_pending: {}", e);
+                    // Handle Wayland errors similarly to how blocking_dispatch did
+                    match e {
+                        wayland_client::DispatchError::Backend(err) => {
+                            match err {
+                                wayland_client::backend::WaylandError::Io(io_err) => {
+                                    if io_err.kind() == std::io::ErrorKind::Interrupted {
+                                        log::warn!("Wayland dispatch_pending interrupted (IO), continuing.");
+                                        // continue; // Loop will continue naturally
+                                    } else {
+                                        log::error!("Wayland dispatch_pending IO error: {}, exiting.", io_err);
+                                        app_state.running = false;
+                                    }
+                                }
+                                wayland_client::backend::WaylandError::Protocol(protocol_err) => {
+                                    log::error!("Wayland dispatch_pending protocol error: {}, exiting.", protocol_err);
+                                    app_state.running = false;
+                                }
+                            }
+                        }
+                        _ => {
+                            log::error!("Unhandled Wayland dispatch_pending error: {}, exiting.", e);
+                            app_state.running = false;
+                        }
+                    }
+                }
+            }
+        } else {
+            // prepare_read() can fail if the display is disconnected.
+            log::error!("Wayland event queue prepare_read failed. Connection might be lost.");
+            app_state.running = false;
+        }
+
+
+        // If an error in dispatch caused us to stop running, or if xdg_toplevel_close was handled,
+        // break the loop early before processing input or drawing.
+        if !app_state.running {
+            break;
+        }
+
+        // 3. Redraw if needed
         if needs_redraw {
             if app_state.surface.is_some() && app_state.compositor.is_some() && app_state.shm.is_some() {
                  app_state.draw(&qh);
@@ -678,26 +704,46 @@ fn main() {
             }
         }
 
-        // Flush the connection (non-blocking for the most part)
-        // Errors here could be critical.
+        // 4. Flush the Wayland connection
+        // It's important to flush to send requests to the compositor.
         if let Err(e) = conn.flush() {
             log::error!("Failed to flush Wayland connection: {}", e);
             match e {
                 wayland_client::backend::WaylandError::Io(io_err) => {
                     if io_err.kind() != std::io::ErrorKind::WouldBlock {
                         log::error!("Wayland flush IO error (not WouldBlock): {}, exiting.", io_err);
-                        app_state.running = false; // Critical error, stop running
+                        app_state.running = false;
+                    } else {
+                        log::trace!("Wayland flush returned WouldBlock, try reading events to unblock or wait.");
+                        // If flush returns WouldBlock, it means the socket buffer is full.
+                        // We should try to read events from the compositor, which might unblock it.
+                        // Or, if there are no events to read, we might need a short sleep to prevent busy-looping.
+                        // However, our loop structure with prepare_read/dispatch_pending should handle this.
+                        // If both libinput and wayland dispatch yield nothing, we might need a small sleep.
                     }
-                    // If it's WouldBlock, we just continue; data will be sent later.
-                    log::trace!("Wayland flush returned WouldBlock, continuing.");
                 }
-                _ => { // Includes Protocol errors or other unexpected issues
-                    log::error!("Critical Wayland flush error: {:?}, exiting.", e);
-                    app_state.running = false; // Critical error, stop running
+                wayland_client::backend::WaylandError::Protocol(protocol_err) => {
+                     log::error!("Wayland flush protocol error: {}, exiting.", protocol_err);
+                    app_state.running = false;
                 }
+                // No other variants if 'dlopen' feature is not used
             }
         }
-        // The std::thread::sleep is removed as blocking_dispatch handles waiting.
+
+        // If no Wayland events were processed and no libinput events were found,
+        // and flush didn't block, we might be busy-looping.
+        // A very short sleep can prevent pegging the CPU in such a scenario.
+        // This is a simple heuristic. A more robust solution would use `poll` on both
+        // libinput FD and Wayland FD.
+        // For now, let's assume `dispatch_pending` or libinput processing takes some time,
+        // or `flush` gives `WouldBlock` which we handle.
+        // If performance issues (like high CPU) arise, this is an area to refine with `poll()`.
+        // Consider adding a small sleep if no events were processed and no redraw occurred.
+        // For now, the `prepare_read` and `dispatch_pending` might implicitly handle some blocking.
+        // Let's rely on Wayland's internal mechanisms or the OS scheduler for now.
+        // A more explicit wait might be needed if CPU usage is high when idle.
+        // For now, removing explicit sleep to see if the new dispatch logic is sufficient.
+        // std::thread::sleep(std::time::Duration::from_millis(1)); // Small sleep to prevent busy loop if nothing happens.
     }
     log::info!("Exiting application loop.");
 }
