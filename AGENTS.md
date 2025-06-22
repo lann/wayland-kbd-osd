@@ -20,10 +20,11 @@ sudo apt-get install -y weston libudev-dev libinput-dev
 
 ## Running Tests
 
+The startup test (`tests::test_startup_no_crash`) requires a Wayland environment and permissions to access . It will attempt to start `weston --headless` automatically. Ensure that `weston` is installed and accessible in your `PATH`.
+
 The tests, including the startup crash detection test, can be run using:
 
 ```bash
 cargo test
 ```
 
-The startup test (`tests::test_startup_no_crash`) requires a Wayland environment. It will attempt to start `weston --headless` automatically. Ensure that `weston` is installed and accessible in your `PATH`.

@@ -265,7 +265,7 @@ impl AppState {
             offset_y = padding + (drawable_height - scaled_layout_height) / 2.0 - (min_coord_y * scale);
         }
 
-        let font_data = include_bytes!("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf");
+        let font_data = include_bytes!("../default-font/DejaVuSansMono.ttf");
         let font = Font::try_from_bytes(font_data as &[u8]).expect("Error constructing Font");
 
         // Default appearance values (unscaled)
