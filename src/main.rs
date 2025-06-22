@@ -113,19 +113,37 @@ fn draw_single_key(
     );
 
     let text_x = (key.width - text_width_pixels) / 2.0;
-    let text_y = (key.height - key.text_size) / 2.0 + v_metrics.ascent;
-    let text_transform = transform.then_translate(raqote::Vector::new(text_x, text_y));
-    dt.set_transform(&text_transform);
+    let text_y = (key.height - key.text_size) / 2.0 + v_metrics.ascent; // This positions the baseline correctly
+
+    // Base transformation for the entire text block (aligns it within the key)
+    let base_text_transform = transform.then_translate(raqote::Vector::new(text_x, text_y));
 
     for glyph_instance in glyphs {
-        let mut glyph_pb = PathBuilder::new();
-        if glyph_instance.unpositioned().build_outline(&mut PathBuilderSink(&mut glyph_pb)) {
-            let glyph_path = glyph_pb.finish();
-            if !glyph_path.ops.is_empty() {
-                dt.fill(&glyph_path, &Source::Solid(key.text_color), &DrawOptions::default());
+        if let Some(bounding_box) = glyph_instance.pixel_bounding_box() {
+            // Create a specific transform for this glyph
+            // The glyphs from font.layout are already positioned relative to the layout's origin (0, ascent_of_first_line)
+            // So, we just need to apply the base_text_transform to move the whole block,
+            // and then rusttype's positioning for individual glyphs takes care of the rest *if drawn relative to that point*.
+            // Raqote draws paths relative to the current transform's origin.
+            // build_outline builds the glyph at (0,0). So we need to translate it to its correct position.
+
+            let glyph_specific_transform = base_text_transform
+                .then_translate(raqote::Vector::new(bounding_box.min.x as f32, bounding_box.min.y as f32));
+
+            dt.set_transform(&glyph_specific_transform);
+
+            let mut glyph_pb = PathBuilder::new();
+            // build_outline for unpositioned glyph draws it as if its origin is (0,0)
+            if glyph_instance.unpositioned().build_outline(&mut PathBuilderSink(&mut glyph_pb)) {
+                let glyph_path = glyph_pb.finish();
+                if !glyph_path.ops.is_empty() {
+                    dt.fill(&glyph_path, &Source::Solid(key.text_color), &DrawOptions::default());
+                }
             }
         }
     }
+    // Reset transform for subsequent drawing operations outside this function if any were planned for the same dt
+    // dt.set_transform(&Transform::identity()); // Or back to `transform` if key drawing continues
 }
 
 use std::os::unix::io::{AsRawFd, BorrowedFd, OwnedFd};
@@ -168,6 +186,7 @@ struct AppState {
     surface: Option<wl_surface::WlSurface>,
     buffer: Option<wl_buffer::WlBuffer>,
     mmap: Option<MmapMut>,
+    temp_file: Option<std::fs::File>, // Added for persistent temp file
     configured_width: i32,
     configured_height: i32,
     running: bool, // Added to control the main loop
@@ -193,6 +212,7 @@ impl AppState {
             surface: None,
             buffer: None,
             mmap: None,
+            temp_file: None, // Initialize temp_file
             configured_width: WINDOW_WIDTH,
             configured_height: WINDOW_HEIGHT,
             running: true, // Initialize to true
@@ -214,19 +234,38 @@ impl AppState {
         let width = self.configured_width;
         let height = self.configured_height;
         let stride = width * 4;
-        let size = stride * height;
+        let size = (stride * height) as usize;
 
-        let temp_file = tempfile::tempfile().expect("Failed to create temp file");
-        temp_file.set_len(size as u64).expect("Failed to set temp file length");
+        // Ensure temp_file and mmap are initialized or resized if necessary
+        let needs_recreation = self.temp_file.is_none() || self.mmap.is_none() ||
+                               match self.mmap.as_ref() {
+                                   Some(m) => m.len() < size,
+                                   None => true, // Should be caught by self.mmap.is_none()
+                               };
 
-        let fd = temp_file.as_raw_fd();
-        let pool = unsafe { shm.create_pool(BorrowedFd::borrow_raw(fd), size, qh, ()) };
+        if needs_recreation {
+            if let Some(buffer) = self.buffer.take() {
+                buffer.destroy();
+            }
+            self.mmap = None; // Drop the old mmap before the file is potentially truncated/resized
+            self.temp_file = None; // Drop the old file
+
+            let temp_f = tempfile::tempfile().expect("Failed to create temp file");
+            temp_f.set_len(size as u64).expect("Failed to set temp file length");
+            self.mmap = Some(unsafe { MmapMut::map_mut(&temp_f).expect("Failed to map temp file") });
+            self.temp_file = Some(temp_f);
+        }
+
+        let mmap = self.mmap.as_mut().unwrap(); // Now safe to unwrap
+        let temp_file_fd = self.temp_file.as_ref().unwrap().as_raw_fd();
+
+        // Create a new pool and buffer for each draw. This is typical.
+        // The expensive part was file creation/mapping, not pool/buffer creation.
+        let pool = unsafe { shm.create_pool(BorrowedFd::borrow_raw(temp_file_fd), size as i32, qh, ()) };
         let buffer = pool.create_buffer(0, width, height, stride, wl_shm::Format::Argb8888, qh, ());
-        pool.destroy();
+        pool.destroy(); // Pool can be destroyed after buffer creation
 
-        let mut mmap = unsafe { MmapMut::map_mut(&temp_file).expect("Failed to map temp file") };
         let mut dt = raqote::DrawTarget::new(width, height);
-
         dt.clear(SolidSource::from_unpremultiplied_argb(0x00, 0x00, 0x00, 0x00));
 
         let scale: f32;
@@ -351,8 +390,14 @@ impl AppState {
         surface.attach(Some(&buffer), 0, 0);
         surface.damage_buffer(0, 0, width, height);
         surface.commit();
-        self.buffer = Some(buffer);
-        self.mmap = Some(mmap);
+
+        // If a previous buffer existed, destroy it.
+        // This should be handled carefully to ensure the compositor is done with it.
+        // Wayland buffer release events can be used for more robust management.
+        if let Some(old_buffer) = self.buffer.replace(buffer) {
+            old_buffer.destroy();
+        }
+        // self.mmap is already updated if it was recreated.
     }
 }
 
