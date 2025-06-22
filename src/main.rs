@@ -170,6 +170,7 @@ struct AppState {
     mmap: Option<MmapMut>,
     configured_width: i32,
     configured_height: i32,
+    running: bool, // Added to control the main loop
     input_context: Option<input::Libinput>,
     // left_ctrl_pressed: bool, // Replaced by key_states
     // left_alt_pressed: bool,  // Replaced by key_states
@@ -194,6 +195,7 @@ impl AppState {
             mmap: None,
             configured_width: WINDOW_WIDTH,
             configured_height: WINDOW_HEIGHT,
+            running: true, // Initialize to true
             input_context: None,
             config: app_config, // Use the passed app_config
             key_states: key_states_map, // Use the initialized map
@@ -386,10 +388,12 @@ impl Dispatch<xdg_toplevel::XdgToplevel, ()> for AppState {
                 log::debug!("XDG Toplevel Configure: width: {}, height: {}, states: {:?}", width, height, states);
                 if width > 0 { state.configured_width = width; }
                 if height > 0 { state.configured_height = height; }
+                // It might be good to trigger a redraw if size changed significantly,
+                // but the xdg_surface configure event usually follows and handles that.
             }
             xdg_toplevel::Event::Close => {
-                log::info!("XDG Toplevel Close event received. Application should exit.");
-                // TODO: Graceful exit
+                log::info!("XDG Toplevel Close event received. Application will exit.");
+                state.running = false; // Signal the main loop to stop
             }
             _ => {}
         }
@@ -542,52 +546,66 @@ fn main() {
     let toplevel = xdg_surface.get_toplevel(&qh, ());
     toplevel.set_title("Wayland Keyboard OSD".to_string());
     surface.commit();
-    log::info!("Wayland window configured. Waiting for events...");
+
+    // Dispatch events once to process initial configure and draw the window.
+    log::info!("Initial surface commit done. Dispatching events to catch initial configure...");
+    if event_queue.roundtrip(&mut app_state).is_err() {
+        log::error!("Error during initial roundtrip after surface commit.");
+        // Depending on the error, might want to exit or handle differently
+    }
+    log::info!("Initial roundtrip complete. Wayland window should be configured and drawn. Waiting for further events...");
 
     use input::event::Event as LibinputEvent;
     use input::event::keyboard::{KeyboardEvent, KeyState, KeyboardEventTrait}; // KeyboardKeyEvent removed as it's the type of key_event
-    use std::time::Duration;
+    // std::time::Duration was removed as std::thread::sleep is no longer used.
 
-    loop {
-        match event_queue.dispatch_pending(&mut app_state) {
-            Ok(_) => {}
+    log::info!("Entering main event loop.");
+    while app_state.running {
+        // Process Wayland events, blocks until events are available or an error occurs.
+        match event_queue.blocking_dispatch(&mut app_state) {
+            Ok(_) => { /* Events dispatched successfully */ }
             Err(e) => {
-                log::error!("Error dispatching Wayland events: {}", e);
+                log::error!("Error in blocking_dispatch: {}", e);
                 match e {
-                    wayland_client::DispatchError::Backend(err) => { // err is wayland_client::backend::WaylandError
+                    wayland_client::DispatchError::Backend(err) => {
                         match err {
                             wayland_client::backend::WaylandError::Io(io_err) => {
                                 if io_err.kind() == std::io::ErrorKind::Interrupted {
                                     log::warn!("Wayland dispatch interrupted (IO), continuing.");
-                                    continue;
+                                    continue; // Try dispatching again
                                 }
-                                log::error!("Wayland dispatch IO error: {}, breaking loop.", io_err);
-                                break;
+                                log::error!("Wayland dispatch IO error: {}, exiting.", io_err);
+                                app_state.running = false;
                             }
                             wayland_client::backend::WaylandError::Protocol(protocol_err) => {
-                                log::error!("Wayland dispatch protocol error: {}, breaking loop.", protocol_err);
-                                break;
+                                log::error!("Wayland dispatch protocol error: {}, exiting.", protocol_err);
+                                app_state.running = false;
                             }
-                            // If dlopen feature is not active, Io and Protocol are exhaustive.
-                            // The NoWaylandLib variant is cfg'd out.
-                            // The previous _ arm caused an unreachable_patterns warning.
+                            // No other variants if 'dlopen' feature is not used
                         }
                     }
-                    _ => {
-                        log::error!("Unhandled Wayland dispatch error (not Backend): {}, breaking loop.", e);
-                        break;
+                    _ => { // Other dispatch errors like Io with no inner WaylandError, or malformed messages
+                        log::error!("Unhandled Wayland dispatch error: {}, exiting.", e);
+                        app_state.running = false;
                     }
                 }
             }
+        }
+
+        // If an error in dispatch caused us to stop running, or if xdg_toplevel_close was handled,
+        // break the loop early before processing input or drawing.
+        if !app_state.running {
+            break;
         }
 
         let mut needs_redraw = false;
         if let Some(ref mut context) = app_state.input_context {
             if context.dispatch().is_err() {
                 log::error!("Libinput dispatch error in event processing loop");
+                // Consider if this should also set app_state.running = false
             }
             while let Some(event) = context.next() {
-                if let LibinputEvent::Keyboard(KeyboardEvent::Key(key_event)) = event { // key_event is KeyboardKeyEvent
+                if let LibinputEvent::Keyboard(KeyboardEvent::Key(key_event)) = event {
                     let key_code = key_event.key();
                     let key_state = key_event.key_state();
                     log::trace!("Key event: code {}, state {:?}", key_code, key_state);
@@ -602,22 +620,6 @@ fn main() {
                             log::info!("Configured key {} state changed: {}", key_code, pressed);
                         }
                     }
-                    // Example: Keep handling for Left Ctrl (29) and Left Alt (56) if they are not in config
-                    // This part can be removed if all interactive keys must be in the config.
-                    // else {
-                    //     match key_code {
-                    //         29 => { // Left Ctrl
-                    //             // This logic would be redundant if LCtrl is in config.
-                    //             // Only needed if we want to handle some keys outside config.
-                    //             log::debug!("Unconfigured LCtrl key event: state {}", pressed);
-                    //         }
-                    //         56 => { // Left Alt
-                    //             log::debug!("Unconfigured LAlt key event: state {}", pressed);
-                    //         }
-                    //         _ => {}
-                    //     }
-                    // }
-
                     if local_needs_redraw { needs_redraw = true; }
                 }
             }
@@ -631,22 +633,26 @@ fn main() {
             }
         }
 
-        if let Err(e) = conn.flush() { // e is wayland_client::backend::WaylandError
+        // Flush the connection (non-blocking for the most part)
+        // Errors here could be critical.
+        if let Err(e) = conn.flush() {
             log::error!("Failed to flush Wayland connection: {}", e);
             match e {
                 wayland_client::backend::WaylandError::Io(io_err) => {
                     if io_err.kind() != std::io::ErrorKind::WouldBlock {
-                        log::error!("Wayland flush IO error (not WouldBlock): {}, breaking loop.", io_err);
-                        break;
+                        log::error!("Wayland flush IO error (not WouldBlock): {}, exiting.", io_err);
+                        app_state.running = false; // Critical error, stop running
                     }
+                    // If it's WouldBlock, we just continue; data will be sent later.
                     log::trace!("Wayland flush returned WouldBlock, continuing.");
                 }
-                _ => {
-                    log::error!("Critical Wayland flush error: {:?}, breaking loop.", e);
-                    break;
+                _ => { // Includes Protocol errors or other unexpected issues
+                    log::error!("Critical Wayland flush error: {:?}, exiting.", e);
+                    app_state.running = false; // Critical error, stop running
                 }
             }
         }
-        std::thread::sleep(Duration::from_millis(16));
+        // The std::thread::sleep is removed as blocking_dispatch handles waiting.
     }
+    log::info!("Exiting application loop.");
 }
