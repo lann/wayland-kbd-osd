@@ -1,9 +1,102 @@
 use wayland_client::{Connection, Dispatch, QueueHandle, Proxy};
-use wayland_client::protocol::{wl_compositor, wl_shm, wl_shm_pool, wl_surface, wl_buffer, wl_registry}; // wl_buffer is already here
+use wayland_client::protocol::{wl_compositor, wl_shm, wl_shm_pool, wl_surface, wl_buffer, wl_registry};
 use wayland_protocols::xdg::shell::client::{xdg_surface, xdg_toplevel, xdg_wm_base};
 
+// Graphics and Font rendering
+use raqote::{SolidSource, PathBuilder, DrawOptions, StrokeStyle, Transform, Source}; // Removed DrawTarget
+use rusttype::{Font, Scale, point, PositionedGlyph, OutlineBuilder};
+use euclid::Angle; // Import Angle
+
+// Struct to hold key properties
+struct KeyDisplay {
+    text: String,
+    center_x: f32,
+    center_y: f32,
+    width: f32,
+    height: f32,
+    corner_radius: f32,
+    border_thickness: f32,
+    rotation_degrees: f32,
+    text_size: f32,
+    border_color: SolidSource,
+    background_color: SolidSource,
+    text_color: SolidSource,
+}
+
+fn draw_single_key(
+    dt: &mut raqote::DrawTarget,
+    key: &KeyDisplay,
+    font: &Font<'_>
+) {
+    // Calculate text metrics first (needed for centering)
+    let scale = Scale::uniform(key.text_size);
+    let v_metrics = font.v_metrics(scale);
+    let glyphs: Vec<PositionedGlyph<'_>> = font
+        .layout(&key.text, scale, point(0.0, 0.0 + v_metrics.ascent))
+        .collect();
+
+    let text_width_pixels = glyphs
+        .iter()
+        .rev()
+        .filter_map(|g| g.pixel_bounding_box().map(|bb| bb.max.x as f32))
+        .next()
+        .unwrap_or(0.0);
+
+    // Create a transform for this specific key
+    let transform = Transform::translation(key.center_x, key.center_y)
+        .then_rotate(Angle::radians(key.rotation_degrees.to_radians()))
+        .then_translate(raqote::Vector::new(-key.width / 2.0, -key.height / 2.0));
+
+    dt.set_transform(&transform);
+
+    // Draw rounded rectangle (background)
+    let mut pb = PathBuilder::new(); // Create a new path builder for each key's geometry
+    pb.move_to(0.0 + key.corner_radius, 0.0);
+    pb.line_to(key.width - key.corner_radius, 0.0);
+    pb.quad_to(key.width, 0.0, key.width, key.corner_radius);
+    pb.line_to(key.width, key.height - key.corner_radius);
+    pb.quad_to(key.width, key.height, key.width - key.corner_radius, key.height);
+    pb.line_to(key.corner_radius, key.height);
+    pb.quad_to(0.0, key.height, 0.0, key.height - key.corner_radius);
+    pb.line_to(0.0, key.corner_radius);
+    pb.quad_to(0.0, 0.0, key.corner_radius, 0.0);
+    pb.close();
+    let key_path = pb.finish();
+
+    dt.fill(&key_path, &Source::Solid(key.background_color), &DrawOptions::default());
+
+    // Draw rounded rectangle (border)
+    dt.stroke(
+        &key_path,
+        &Source::Solid(key.border_color),
+        &StrokeStyle {
+            width: key.border_thickness,
+            ..Default::default()
+        },
+        &DrawOptions::default(),
+    );
+
+    // Draw text
+    let text_x = (key.width - text_width_pixels) / 2.0;
+    let text_y = (key.height - key.text_size) / 2.0 + v_metrics.ascent;
+    let text_transform = transform.then_translate(raqote::Vector::new(text_x, text_y));
+    dt.set_transform(&text_transform);
+
+    for glyph_instance in glyphs {
+        let mut glyph_pb = PathBuilder::new(); // Create a new PathBuilder for each glyph
+        if glyph_instance.unpositioned().build_outline(&mut PathBuilderSink(&mut glyph_pb)) {
+            let glyph_path = glyph_pb.finish();
+            if !glyph_path.ops.is_empty() {
+                dt.fill(&glyph_path, &Source::Solid(key.text_color), &DrawOptions::default());
+            }
+        }
+    }
+    // The main draw loop will reset the transform once after all keys (or other elements) are drawn.
+}
+
+
 // Remove unused File and Write
-use std::os::unix::io::{AsRawFd, BorrowedFd}; // Added BorrowedFd
+use std::os::unix::io::{AsRawFd, BorrowedFd};
 use memmap2::MmapMut;
 
 const WINDOW_WIDTH: i32 = 320;
@@ -48,44 +141,122 @@ impl AppState {
         let stride = width * 4; // 4 bytes per pixel (ARGB8888)
         let size = stride * height;
 
-        // Create a temporary file for shared memory
-        let temp_file = tempfile::tempfile().expect("Failed to create temp file"); // Removed mut
+        let temp_file = tempfile::tempfile().expect("Failed to create temp file");
         temp_file.set_len(size as u64).expect("Failed to set temp file length");
 
-        let fd = temp_file.as_raw_fd(); // Get raw fd first
-        let pool = unsafe { shm.create_pool(BorrowedFd::borrow_raw(fd), size, qh, ()) }; // Use BorrowedFd, needs unsafe for borrow_raw
-
+        let fd = temp_file.as_raw_fd();
+        let pool = unsafe { shm.create_pool(BorrowedFd::borrow_raw(fd), size, qh, ()) };
         let buffer = pool.create_buffer(0, width, height, stride, wl_shm::Format::Argb8888, qh, ());
-        pool.destroy(); // Pool can be destroyed after buffer creation
+        pool.destroy();
 
-        // Memory map the file
         let mut mmap = unsafe { MmapMut::map_mut(&temp_file).expect("Failed to map temp file") };
+        let mut dt = raqote::DrawTarget::new(width, height);
 
-        // Draw a blue rectangle with a red border
-        for y in 0..height {
-            for x in 0..width {
-                let offset = (y * stride + x * 4) as usize;
-                let color: u32 = if x < 5 || x >= width - 5 || y < 5 || y >= height - 5 {
-                    0xFFFF0000 // Red border (ARGB)
-                } else {
-                    0xFF0000FF // Blue rectangle (ARGB)
-                };
-                mmap[offset..offset+4].copy_from_slice(&color.to_le_bytes());
+        // Clear the drawing target once
+        dt.clear(SolidSource::from_unpremultiplied_argb(0x00, 0x00, 0x00, 0x00));
+
+        // Load font once
+        let font_data = include_bytes!("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf");
+        let font = Font::try_from_bytes(font_data as &[u8]).expect("Error constructing Font");
+
+        // Define common properties for keys, can be customized per key
+        let key_w: f32 = 80.0; // Slightly smaller keys to fit more
+        let key_h: f32 = 40.0;
+        let corner_r: f32 = 8.0;
+        let border_t: f32 = 2.0;
+        let default_rot: f32 = 30.0; // Less rotation to manage space
+        let txt_size: f32 = 18.0; // Smaller text
+
+        let border_c = SolidSource::from_unpremultiplied_argb(0xFF, 0x80, 0x80, 0x80); // Grey
+        let background_c = SolidSource::from_unpremultiplied_argb(0xFF, 0xE0, 0xE0, 0xE0); // Lighter grey
+        let text_c = SolidSource::from_unpremultiplied_argb(0xFF, 0x10, 0x10, 0x10); // Darker Black
+
+        let keys_to_draw = vec![
+            KeyDisplay {
+                text: "Alt".to_string(),
+                center_x: width as f32 * 0.70,
+                center_y: height as f32 * 0.60,
+                width: key_w,
+                height: key_h,
+                corner_radius: corner_r,
+                border_thickness: border_t,
+                rotation_degrees: default_rot,
+                text_size: txt_size,
+                border_color: border_c,
+                background_color: background_c,
+                text_color: text_c,
+            },
+            KeyDisplay {
+                text: "Ctrl".to_string(),
+                center_x: width as f32 * 0.30,
+                center_y: height as f32 * 0.40,
+                width: key_w,
+                height: key_h,
+                corner_radius: corner_r,
+                border_thickness: border_t,
+                rotation_degrees: default_rot - 5.0, // Slightly different rotation
+                text_size: txt_size,
+                border_color: border_c,
+                background_color: background_c,
+                text_color: text_c,
+            },
+        ];
+
+        for key_spec in keys_to_draw {
+            draw_single_key(&mut dt, &key_spec, &font);
+        }
+
+        // Reset transform after all drawing operations on dt that use transforms
+        dt.set_transform(&Transform::identity());
+
+        let dt_buffer = dt.get_data_u8();
+        for y_idx in 0..height {
+            for x_idx in 0..width {
+                let dt_buf_idx = (y_idx * width + x_idx) as usize * 4;
+                let mmap_buf_idx = (y_idx * stride + x_idx * 4) as usize;
+                if dt_buf_idx + 3 < dt_buffer.len() && mmap_buf_idx + 3 < mmap.len() {
+                    let a = dt_buffer[dt_buf_idx + 3]; // Raqote is BGRA in get_data_u8, so A is at +3
+                    let r = dt_buffer[dt_buf_idx + 2]; // R is at +2
+                    let g = dt_buffer[dt_buf_idx + 1]; // G is at +1
+                    let b = dt_buffer[dt_buf_idx + 0]; // B is at +0
+                    // Wayland expects ARGB8888, which means u32 with A in MSB.
+                    // On little-endian, memory layout for 0xAARRGGBB u32 is BB GG RR AA.
+                    // Raqote provides BGRA bytes: B, G, R, A.
+                    // So, we want to write [B, G, R, A] into mmap.
+                    // pixel_value from these bytes should be (A<<24)|(R<<16)|(G<<8)|B
+                    let pixel_value = (a as u32) << 24 | (r as u32) << 16 | (g as u32) << 8 | (b as u32);
+                    mmap[mmap_buf_idx..mmap_buf_idx+4].copy_from_slice(&pixel_value.to_le_bytes());
+                }
             }
         }
 
-        // For "hello world", we'll just print to console for now, as rendering text is complex.
-        log::info!("Drawing content (rectangle + 'Hello World' placeholder)");
-
-        // Attach the buffer and commit
+        log::info!("Drawing content (rotated 'Alt' key)");
         surface.attach(Some(&buffer), 0, 0);
-        surface.damage_buffer(0, 0, width, height); // Mark the whole buffer as damaged
+        surface.damage_buffer(0, 0, width, height);
         surface.commit();
-
-        // Store buffer and mmap so they are not dropped immediately
-        // In a real app, you'd manage buffers more carefully (e.g., double buffering)
         self.buffer = Some(buffer);
-        self.mmap = Some(mmap); // Keep mmap alive
+        self.mmap = Some(mmap);
+    }
+}
+
+// Helper for rusttype to raqote path conversion
+struct PathBuilderSink<'a>(&'a mut raqote::PathBuilder);
+
+impl<'a> OutlineBuilder for PathBuilderSink<'a> { // Ensure this uses rusttype::OutlineBuilder
+    fn move_to(&mut self, x: f32, y: f32) {
+        self.0.move_to(x, y);
+    }
+    fn line_to(&mut self, x: f32, y: f32) {
+        self.0.line_to(x, y);
+    }
+    fn quad_to(&mut self, x1: f32, y1: f32, x: f32, y: f32) {
+        self.0.quad_to(x1, y1, x, y);
+    }
+    fn curve_to(&mut self, x1: f32, y1: f32, x2: f32, y2: f32, x: f32, y: f32) {
+        self.0.cubic_to(x1, y1, x2, y2, x, y);
+    }
+    fn close(&mut self) {
+        self.0.close();
     }
 }
 
