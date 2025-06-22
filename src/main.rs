@@ -278,7 +278,7 @@ impl AppState {
             surface.damage_buffer(0, 0, width, height);
             surface.commit();
             self.buffer = Some(buffer);
-            self.mmap = Some(mmap);
+            // self.mmap = Some(mmap); // This line caused the error and is not needed here.
             return;
         } else {
             let mut min_coord_x = f32::MAX;
