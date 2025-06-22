@@ -6,7 +6,11 @@ use input; // Added for libinput
 use std::collections::HashMap; // For storing key states and configs by keycode
 // Serde for TOML deserialization
 use serde::Deserialize;
+use serde_value::Value as SerdeValue; // For flexible keycode parsing
 use std::fs; // For file reading
+use std::process; // For exiting gracefully on config error
+
+mod keycodes; // Our new module
 
 // Graphics and Font rendering
 use raqote::{SolidSource, PathBuilder, DrawOptions, StrokeStyle, Transform, Source};
@@ -21,7 +25,10 @@ struct KeyConfig {
     height: f32,
     x: f32,
     y: f32,
-    keycode: u32,
+    #[serde(alias = "keycode")] // Accept "keycode" for initial deserialization
+    raw_keycode: Option<SerdeValue>, // Will hold string or int from TOML, or be None
+    #[serde(skip_deserializing)] // This field is populated after initial deserialization
+    keycode: u32, // The resolved keycode
     rotation_degrees: Option<f32>, // Optional, defaults to 0 or a global default
     text_size: Option<f32>,       // Optional, defaults to a global default
     corner_radius: Option<f32>,   // Optional
@@ -433,16 +440,81 @@ fn main() {
     // Load configuration
     let config_path = "keys.toml";
     let config_content = fs::read_to_string(config_path)
-        .expect(&format!("Failed to read configuration file: {}", config_path));
-    let app_config: AppConfig = toml::from_str(&config_content)
-        .expect("Failed to parse TOML configuration");
+        .unwrap_or_else(|e| {
+            eprintln!("Failed to read configuration file '{}': {}", config_path, e);
+            process::exit(1);
+        });
 
-    log::info!("Configuration loaded: {:?}", app_config);
+    let mut app_config: AppConfig = toml::from_str(&config_content)
+        .unwrap_or_else(|e| {
+            eprintln!("Failed to parse TOML configuration from '{}': {}", config_path, e);
+            process::exit(1);
+        });
+
+    // Process raw_keycode to populate keycode
+    for key_conf in app_config.key.iter_mut() {
+        let resolved_code = match key_conf.raw_keycode.as_ref() {
+            Some(SerdeValue::String(s)) => {
+                keycodes::get_keycode_from_string(s)
+            }
+            // Handle various integer types that serde_value might produce from TOML
+            Some(SerdeValue::U8(i)) => Ok(*i as u32),
+            Some(SerdeValue::U16(i)) => Ok(*i as u32),
+            Some(SerdeValue::U32(i)) => Ok(*i),
+            Some(SerdeValue::U64(i)) => {
+                if *i <= u32::MAX as u64 {
+                    Ok(*i as u32)
+                } else {
+                    Err(format!("Integer keycode {} for key '{}' is too large for u32.", i, key_conf.name))
+                }
+            }
+            Some(SerdeValue::I8(i)) => {
+                if *i >= 0 { Ok(*i as u32) } else { Err(format!("Negative keycode {} for key '{}' is invalid.", i, key_conf.name)) }
+            }
+            Some(SerdeValue::I16(i)) => {
+                if *i >= 0 { Ok(*i as u32) } else { Err(format!("Negative keycode {} for key '{}' is invalid.", i, key_conf.name)) }
+            }
+            Some(SerdeValue::I32(i)) => {
+                if *i >= 0 { Ok(*i as u32) } else { Err(format!("Negative keycode {} for key '{}' is invalid.", i, key_conf.name)) }
+            }
+            Some(SerdeValue::I64(i)) => {
+                if *i >= 0 && *i <= u32::MAX as i64 {
+                    Ok(*i as u32)
+                } else {
+                    Err(format!("Integer keycode {} for key '{}' is out of valid u32 range.", i, key_conf.name))
+                }
+            }
+            None => { // Default to name field
+                keycodes::get_keycode_from_string(&key_conf.name)
+            }
+            Some(other_type) => {
+                 Err(format!("Invalid type for keycode field for key '{}': expected string or integer, got {:?}", key_conf.name, other_type))
+            }
+        };
+
+        match resolved_code {
+            Ok(code) => key_conf.keycode = code,
+            Err(e) => {
+                // If defaulting from 'name' failed, guide user to set 'keycode'
+                if key_conf.raw_keycode.is_none() {
+                     eprintln!(
+                        "Error processing key '{}': Could not resolve default keycode from name ('{}'). Please specify a 'keycode' field for this key. Details: {}",
+                        key_conf.name, key_conf.name, e
+                    );
+                } else {
+                    eprintln!("Error processing keycode for key '{}': {}", key_conf.name, e);
+                }
+                process::exit(1);
+            }
+        }
+    }
+
+    log::info!("Configuration loaded and processed: {:?}", app_config);
 
     let conn = Connection::connect_to_env().unwrap();
     let mut event_queue = conn.new_event_queue();
     let qh = event_queue.handle();
-    let mut app_state = AppState::new(app_config.clone()); // Pass config to AppState
+    let mut app_state = AppState::new(app_config.clone()); // Pass processed config to AppState
     let _registry = conn.display().get_registry(&qh, ());
     event_queue.roundtrip(&mut app_state).unwrap();
 
