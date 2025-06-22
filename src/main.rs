@@ -565,12 +565,23 @@ fn main() {
     let qh = event_queue.handle();
     let mut app_state = AppState::new(app_config.clone()); // Pass processed config to AppState
     let _registry = conn.display().get_registry(&qh, ());
-    event_queue.roundtrip(&mut app_state).unwrap();
+
+    log::info!("Attempting initial roundtrip to bind globals...");
+    match event_queue.roundtrip(&mut app_state) {
+        Ok(count) => log::info!("Initial roundtrip successful, {} events processed.", count),
+        Err(e) => {
+            log::error!("Error during initial roundtrip for globals: {}", e);
+            // Consider exiting or specific error handling
+            panic!("Failed initial roundtrip for globals: {}", e);
+        }
+    }
 
     if app_state.compositor.is_none() || app_state.shm.is_none() || app_state.xdg_wm_base.is_none() {
+        log::error!("Essential Wayland globals not bound after initial roundtrip.");
+        log::error!("Compositor: {:?}, SHM: {:?}, XDG WM Base: {:?}", app_state.compositor.is_some(), app_state.shm.is_some(), app_state.xdg_wm_base.is_some());
         panic!("Failed to bind essential Wayland globals.");
     }
-    log::info!("Essential globals bound.");
+    log::info!("Essential globals bound successfully.");
 
     let interface = MyLibinputInterface;
     let mut libinput_context = input::Libinput::new_with_udev(interface);
@@ -593,33 +604,58 @@ fn main() {
     surface.commit();
 
     // Dispatch events once to process initial configure and draw the window.
-    log::info!("Initial surface commit done. Dispatching events to catch initial configure...");
-    if event_queue.roundtrip(&mut app_state).is_err() {
-        log::error!("Error during initial roundtrip after surface commit.");
-        // Depending on the error, might want to exit or handle differently
+    log::info!("Initial surface commit done. Dispatching events via roundtrip to catch initial configure...");
+    match event_queue.roundtrip(&mut app_state) {
+        Ok(count) => log::info!("Second roundtrip successful (post-surface commit), {} events processed.", count),
+        Err(e) => {
+            log::error!("Error during second roundtrip (post-surface commit): {}", e);
+            // This might be critical, as window configuration might not complete.
+            // Depending on the error, might want to exit or handle differently.
+            // For now, we'll log and continue, but this is a potential failure point.
+        }
     }
-    log::info!("Initial roundtrip complete. Wayland window should be configured and drawn. Waiting for further events...");
+    log::info!("Second roundtrip complete. Wayland window should be configured and drawn if successful. Waiting for further events...");
 
     use input::event::Event as LibinputEvent;
     use input::event::keyboard::{KeyboardEvent, KeyState, KeyboardEventTrait}; // KeyboardKeyEvent removed as it's the type of key_event
     // std::time::Duration was removed as std::thread::sleep is no longer used.
 
     log::info!("Entering main event loop.");
-    // Get FD for polling. In wayland-client 0.31, this might be obtained via conn.backend().poll_fd()
-    // For now, this FD is not used in the current loop structure, so commenting out to avoid compile errors.
-    // let event_queue_fd = conn.backend().poll_fd();
+    // Get FD for polling.
+    // Backend must live as long as wayland_fd which borrows it.
+    let backend = conn.backend();
+    let wayland_fd = backend.poll_fd();
+
+    // Create a poller instance
+    let poller = polling::Poller::new().expect("Failed to create poller");
+    // Register the Wayland FD for readability. Key 0 for Wayland.
+    // `wayland_fd` is a BorrowedFd, which implements AsFd, usable by poller.add.
+    // No .as_raw_fd() needed here if Poller can take AsFd.
+    // The poller.add method itself is unsafe, as is modify.
+    // The unsafety is in ensuring the FD remains valid while in the poller.
+    // Since `backend` and `conn` outlive `poller` or have similar lifetimes within main,
+    // and `wayland_fd` borrows `backend`, this setup is as safe as we can make it.
+    unsafe {
+        poller.add(&wayland_fd, polling::Event::readable(0))
+            .expect("Failed to add Wayland FD to poller");
+    }
+
+    // Note: We are not polling libinput FD for now to simplify.
+    // Libinput events will be processed by calling dispatch() periodically.
+
+    let mut poller_events = polling::Events::new(); // To store events from the poller
 
     while app_state.running {
         let mut needs_redraw = false;
+        let mut wayland_fd_is_writable = false;
 
         // 1. Process libinput events first (non-blocking)
+        // This is done before polling for Wayland events.
         if let Some(ref mut context) = app_state.input_context {
-            // Dispatch any pending libinput events.
-            // This is non-blocking and should be called before checking for new events.
-            if context.dispatch().is_err() {
-                log::error!("Libinput dispatch error before processing events");
+            if context.dispatch().is_err() { // Dispatch any pending events
+                log::error!("Libinput dispatch error");
             }
-            while let Some(event) = context.next() {
+            while let Some(event) = context.next() { // Process dispatched events
                 if let LibinputEvent::Keyboard(KeyboardEvent::Key(key_event)) = event {
                     let key_code = key_event.key();
                     let key_state = key_event.key_state();
@@ -629,7 +665,7 @@ fn main() {
                     if let Some(current_state) = app_state.key_states.get_mut(&key_code) {
                         if *current_state != pressed {
                             *current_state = pressed;
-                            needs_redraw = true; // Set redraw flag
+                            needs_redraw = true;
                             log::info!("Configured key {} state changed: {}", key_code, pressed);
                         }
                     }
@@ -637,113 +673,150 @@ fn main() {
             }
         }
 
-        // 2. Process Wayland events (non-blocking)
-        // `prepare_read()` returns `Option<ReadEventsGuard>`.
-        // `Some` means reading is possible, `None` means the queue is already borrowed
-        // or the connection is dead.
-        if let Some(read_guard) = event_queue.prepare_read() {
-            // Drop the guard, allowing other threads to queue events if that were part of the design.
-            // For single-threaded, it's mainly about synchronizing access to the queue.
-            drop(read_guard); // Explicitly drop, though it would drop at end of scope anyway.
+        // 2. Wait for events (Wayland FD readability/writability)
+        // We block here until the Wayland FD is readable or writable (if requested due to flush WouldBlock)
+        // or timeout. Using a timeout allows libinput to be processed periodically if it's not polled.
+        // A timeout of -1 means block indefinitely.
+        // For now, let's use a small timeout to also allow libinput to be checked if no Wayland events.
+        // Or, if flush needs writability, we adjust interest.
 
-            // Dispatch pending events. This is non-blocking.
-            // It can return Err if the connection is broken during dispatch.
-            match event_queue.dispatch_pending(&mut app_state) {
-                Ok(dispatched_count) => {
-                    if dispatched_count > 0 {
-                        log::trace!("Dispatched {} Wayland events.", dispatched_count);
-                    }
+        poller_events.clear(); // Clear events from previous iteration
+        log::trace!("Polling for Wayland events...");
+        match poller.wait(&mut poller_events, Some(std::time::Duration::from_millis(16))) {
+            Ok(num_events) => {
+                if num_events == 0 {
+                    log::trace!("Poller timed out, no FD events.");
                 }
-                Err(e) => {
-                    log::error!("Error in dispatch_pending: {}", e);
-                    // Handle Wayland errors similarly to how blocking_dispatch did
-                    match e {
-                        wayland_client::DispatchError::Backend(err) => {
-                            match err {
-                                wayland_client::backend::WaylandError::Io(io_err) => {
-                                    if io_err.kind() == std::io::ErrorKind::Interrupted {
-                                        log::warn!("Wayland dispatch_pending interrupted (IO), continuing.");
-                                        // continue; // Loop will continue naturally
-                                    } else {
-                                        log::error!("Wayland dispatch_pending IO error: {}, exiting.", io_err);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {
+                log::warn!("Poller wait interrupted, continuing.");
+                // continue; // Loop will continue naturally
+            }
+            Err(e) => {
+                log::error!("Poller wait error: {}, exiting.", e);
+                app_state.running = false;
+                // break; // Exit loop immediately
+            }
+        }
+
+        if !app_state.running { break; }
+
+
+        for ev in poller_events.iter() { // Iterate over polling::Event
+            if ev.key == 0 { // Wayland FD event (key 0 was used for Wayland FD)
+                if ev.readable {
+                    log::trace!("Wayland FD is readable. Attempting to dispatch Wayland events.");
+                    // Try to dispatch events
+                    // `prepare_read` checks if the queue can be borrowed.
+                    if let Some(guard) = event_queue.prepare_read() {
+                        drop(guard); // Release the guard
+                        match event_queue.dispatch_pending(&mut app_state) {
+                            Ok(dispatched_count) => {
+                                if dispatched_count > 0 {
+                                    log::info!("Dispatched {} Wayland events.", dispatched_count);
+                                } else {
+                                    log::trace!("No Wayland events dispatched despite FD being readable.");
+                                }
+                            }
+                            Err(e) => {
+                                log::error!("Error in dispatch_pending after poll: {}", e);
+                                // Handle error as before
+                                match e {
+                                    wayland_client::DispatchError::Backend(err) => {
+                                        match err {
+                                            wayland_client::backend::WaylandError::Io(io_err) => {
+                                                if io_err.kind() == std::io::ErrorKind::Interrupted {
+                                                    log::warn!("Wayland dispatch_pending (polled) interrupted (IO), continuing.");
+                                                } else {
+                                                    log::error!("Wayland dispatch_pending (polled) IO error: {}, exiting.", io_err);
+                                                    app_state.running = false;
+                                                }
+                                            }
+                                            wayland_client::backend::WaylandError::Protocol(protocol_err) => {
+                                                log::error!("Wayland dispatch_pending (polled) protocol error: {}, exiting.", protocol_err);
+                                                app_state.running = false;
+                                            }
+                                        }
+                                    }
+                                    _ => { // Includes DispatchError::NoWaylandLib, DispatchError::ObjectAlreadyDead, DispatchError::ObjectUnknown
+                                        log::error!("Unhandled Wayland dispatch_pending (polled) error: {}, exiting.", e);
                                         app_state.running = false;
                                     }
                                 }
-                                wayland_client::backend::WaylandError::Protocol(protocol_err) => {
-                                    log::error!("Wayland dispatch_pending protocol error: {}, exiting.", protocol_err);
-                                    app_state.running = false;
-                                }
                             }
                         }
-                        _ => {
-                            log::error!("Unhandled Wayland dispatch_pending error: {}, exiting.", e);
-                            app_state.running = false;
-                        }
+                    } else {
+                        // This case should ideally not happen if poll indicated readability
+                        // and we are the only ones accessing the queue.
+                        log::warn!("prepare_read failed after Wayland FD was reported readable by poll.");
+                        // Could indicate connection died between poll and prepare_read
+                        app_state.running = false;
+                    }
+                }
+                if ev.writable {
+                    log::trace!("Wayland FD is writable.");
+                    wayland_fd_is_writable = true;
+                    // We might have requested writability if flush previously failed with WouldBlock.
+                    // Now that it's writable, we can try flushing again.
+                    // And then we should probably stop polling for writability until it's needed again.
+                    // FD is still valid as `backend` (and `conn`) have a lifetime covering this loop.
+                    unsafe {
+                        poller.modify(&wayland_fd, polling::Event::readable(0)) // Use &wayland_fd
+                            .expect("Failed to modify Wayland FD to readable only");
                     }
                 }
             }
-        } else {
-            // prepare_read() can fail if the display is disconnected.
-            log::error!("Wayland event queue prepare_read failed. Connection might be lost.");
-            app_state.running = false;
         }
 
-
-        // If an error in dispatch caused us to stop running, or if xdg_toplevel_close was handled,
-        // break the loop early before processing input or drawing.
-        if !app_state.running {
-            break;
-        }
+        if !app_state.running { break; }
 
         // 3. Redraw if needed
         if needs_redraw {
             if app_state.surface.is_some() && app_state.compositor.is_some() && app_state.shm.is_some() {
-                 app_state.draw(&qh);
+                app_state.draw(&qh);
             } else {
                 log::warn!("Skipping draw due to uninitialized Wayland components.");
             }
         }
 
         // 4. Flush the Wayland connection
-        // It's important to flush to send requests to the compositor.
-        if let Err(e) = conn.flush() {
-            log::error!("Failed to flush Wayland connection: {}", e);
-            match e {
-                wayland_client::backend::WaylandError::Io(io_err) => {
-                    if io_err.kind() != std::io::ErrorKind::WouldBlock {
-                        log::error!("Wayland flush IO error (not WouldBlock): {}, exiting.", io_err);
+        log::trace!("Attempting to flush Wayland connection (writable: {})...", wayland_fd_is_writable);
+        match conn.flush() {
+            Ok(_) => {
+                log::trace!("Wayland connection flushed successfully.");
+                // If we were polling for writability, we can stop now.
+                // (Handled above when `ev.writable` was true)
+            }
+            Err(e) => {
+                log::error!("Failed to flush Wayland connection: {}", e);
+                match e {
+                    wayland_client::backend::WaylandError::Io(io_err) => {
+                        if io_err.kind() == std::io::ErrorKind::WouldBlock {
+                            log::warn!("Wayland flush returned WouldBlock. Requesting writability poll.");
+                            // Request polling for writability for the Wayland FD
+                            // FD is still valid.
+                            let mut event_interest = polling::Event::readable(0); // Key 0, readable
+                            event_interest.writable = true; // Also make it writable
+                            unsafe {
+                                poller.modify(&wayland_fd, event_interest) // Use &wayland_fd
+                                    .expect("Failed to modify Wayland FD to poll for writability");
+                            }
+                        } else {
+                            log::error!("Wayland flush IO error (not WouldBlock): {}, exiting.", io_err);
+                            app_state.running = false;
+                        }
+                    }
+                    wayland_client::backend::WaylandError::Protocol(protocol_err) => {
+                        log::error!("Wayland flush protocol error: {}, exiting.", protocol_err);
                         app_state.running = false;
-                    } else {
-                        log::trace!("Wayland flush returned WouldBlock, try reading events to unblock or wait.");
-                        // If flush returns WouldBlock, it means the socket buffer is full.
-                        // We should try to read events from the compositor, which might unblock it.
-                        // Or, if there are no events to read, we might need a short sleep to prevent busy-looping.
-                        // However, our loop structure with prepare_read/dispatch_pending should handle this.
-                        // If both libinput and wayland dispatch yield nothing, we might need a small sleep.
                     }
                 }
-                wayland_client::backend::WaylandError::Protocol(protocol_err) => {
-                     log::error!("Wayland flush protocol error: {}, exiting.", protocol_err);
-                    app_state.running = false;
-                }
-                // No other variants if 'dlopen' feature is not used
             }
         }
-
-        // If no Wayland events were processed and no libinput events were found,
-        // and flush didn't block, we might be busy-looping.
-        // A very short sleep can prevent pegging the CPU in such a scenario.
-        // This is a simple heuristic. A more robust solution would use `poll` on both
-        // libinput FD and Wayland FD.
-        // For now, let's assume `dispatch_pending` or libinput processing takes some time,
-        // or `flush` gives `WouldBlock` which we handle.
-        // If performance issues (like high CPU) arise, this is an area to refine with `poll()`.
-        // Consider adding a small sleep if no events were processed and no redraw occurred.
-        // For now, the `prepare_read` and `dispatch_pending` might implicitly handle some blocking.
-        // Let's rely on Wayland's internal mechanisms or the OS scheduler for now.
-        // A more explicit wait might be needed if CPU usage is high when idle.
-        // For now, removing explicit sleep to see if the new dispatch logic is sufficient.
-        // std::thread::sleep(std::time::Duration::from_millis(1)); // Small sleep to prevent busy loop if nothing happens.
+        if !app_state.running { break; }
     }
     log::info!("Exiting application loop.");
+
+    // Clean up poller by removing FD (optional, as Poller drops it)
+    // poller.delete(wayland_fd.as_raw_fd()).expect("Failed to delete Wayland FD from poller");
 }
