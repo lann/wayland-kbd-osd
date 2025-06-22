@@ -3,12 +3,45 @@ use wayland_client::protocol::{wl_compositor, wl_shm, wl_shm_pool, wl_surface, w
 use wayland_protocols::xdg::shell::client::{xdg_surface, xdg_toplevel, xdg_wm_base};
 use input; // Added for libinput
 
+use std::collections::HashMap; // For storing key states and configs by keycode
+// Serde for TOML deserialization
+use serde::Deserialize;
+use std::fs; // For file reading
+
 // Graphics and Font rendering
 use raqote::{SolidSource, PathBuilder, DrawOptions, StrokeStyle, Transform, Source};
 use rusttype::{Font, Scale, point, PositionedGlyph, OutlineBuilder};
 use euclid::Angle;
 
-// Struct to hold key properties
+// Configuration Structs
+#[derive(Deserialize, Debug, Clone)]
+struct KeyConfig {
+    name: String,
+    width: f32,
+    height: f32,
+    x: f32,
+    y: f32,
+    keycode: u32,
+    rotation_degrees: Option<f32>, // Optional, defaults to 0 or a global default
+    text_size: Option<f32>,       // Optional, defaults to a global default
+    corner_radius: Option<f32>,   // Optional
+    border_thickness: Option<f32>,// Optional
+    // Colors could also be strings like "#RRGGBBAA" and parsed later
+    // For now, keeping them simple, assuming they might be added if needed
+    // border_color_hex: Option<String>,
+    // background_color_hex: Option<String>,
+    // text_color_hex: Option<String>,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+struct AppConfig {
+    key: Vec<KeyConfig>,
+    // Potentially global settings here, like default font, colors, etc.
+    // default_text_size: Option<f32>,
+    // default_corner_radius: Option<f32>,
+}
+
+// Struct to hold key properties for drawing
 struct KeyDisplay {
     text: String,
     center_x: f32,
@@ -131,12 +164,20 @@ struct AppState {
     configured_width: i32,
     configured_height: i32,
     input_context: Option<input::Libinput>,
-    left_ctrl_pressed: bool,
-    left_alt_pressed: bool,
+    // left_ctrl_pressed: bool, // Replaced by key_states
+    // left_alt_pressed: bool,  // Replaced by key_states
+    config: AppConfig,               // Store loaded configuration
+    key_states: HashMap<u32, bool>,  // Stores pressed state for each configured keycode
+    // key_config_map: HashMap<u32, KeyConfig>, // For quick lookup - might be better to build this once in new()
 }
 
 impl AppState {
-    fn new() -> Self {
+    fn new(app_config: AppConfig) -> Self { // Renamed to avoid conflict
+        let mut key_states_map = HashMap::new();
+        for key_conf in app_config.key.iter() {
+            key_states_map.insert(key_conf.keycode, false);
+        }
+
         AppState {
             compositor: None,
             shm: None,
@@ -147,8 +188,8 @@ impl AppState {
             configured_width: WINDOW_WIDTH,
             configured_height: WINDOW_HEIGHT,
             input_context: None,
-            left_ctrl_pressed: false,
-            left_alt_pressed: false,
+            config: app_config, // Use the passed app_config
+            key_states: key_states_map, // Use the initialized map
         }
     }
 
@@ -179,40 +220,101 @@ impl AppState {
 
         dt.clear(SolidSource::from_unpremultiplied_argb(0x00, 0x00, 0x00, 0x00));
 
+        let scale: f32;
+        let offset_x: f32;
+        let offset_y: f32;
+
+        if self.config.key.is_empty() {
+            log::warn!("No keys configured. Nothing to draw.");
+            surface.attach(Some(&buffer), 0, 0);
+            surface.damage_buffer(0, 0, width, height);
+            surface.commit();
+            self.buffer = Some(buffer);
+            self.mmap = Some(mmap);
+            return;
+        } else {
+            let mut min_coord_x = f32::MAX;
+            let mut max_coord_x = f32::MIN;
+            let mut min_coord_y = f32::MAX;
+            let mut max_coord_y = f32::MIN;
+
+            for key_config in &self.config.key {
+                // Assuming key_config.x and .y are CENTER coordinates from TOML
+                let key_half_width = key_config.width / 2.0;
+                let key_half_height = key_config.height / 2.0;
+                min_coord_x = min_coord_x.min(key_config.x - key_half_width);
+                max_coord_x = max_coord_x.max(key_config.x + key_half_width);
+                min_coord_y = min_coord_y.min(key_config.y - key_half_height);
+                max_coord_y = max_coord_y.max(key_config.y + key_half_height);
+            }
+
+            let layout_width = max_coord_x - min_coord_x;
+            let layout_height = max_coord_y - min_coord_y;
+
+            let padding = (width.min(height) as f32 * 0.05).max(5.0); // 5% padding, min 5px
+            let drawable_width = width as f32 - 2.0 * padding;
+            let drawable_height = height as f32 - 2.0 * padding;
+
+            let current_scale_x = if layout_width > 0.0 { drawable_width / layout_width } else { 1.0 };
+            let current_scale_y = if layout_height > 0.0 { drawable_height / layout_height } else { 1.0 };
+            scale = current_scale_x.min(current_scale_y).max(0.01); // Preserve aspect ratio, ensure scale is positive
+
+            let scaled_layout_width = layout_width * scale;
+            let scaled_layout_height = layout_height * scale;
+            offset_x = padding + (drawable_width - scaled_layout_width) / 2.0 - (min_coord_x * scale);
+            offset_y = padding + (drawable_height - scaled_layout_height) / 2.0 - (min_coord_y * scale);
+        }
+
         let font_data = include_bytes!("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf");
         let font = Font::try_from_bytes(font_data as &[u8]).expect("Error constructing Font");
 
-        let key_w: f32 = 80.0;
-        let key_h: f32 = 40.0;
-        let corner_r: f32 = 8.0;
-        let border_t: f32 = 2.0;
-        let default_rot: f32 = 30.0;
-        let txt_size: f32 = 18.0;
+        // Default appearance values (unscaled)
+        const DEFAULT_CORNER_RADIUS_UNSCALED: f32 = 8.0;
+        const DEFAULT_BORDER_THICKNESS_UNSCALED: f32 = 2.0;
+        const DEFAULT_ROTATION_DEGREES: f32 = 0.0; // Rotation is not scaled
+        const DEFAULT_TEXT_SIZE_UNSCALED: f32 = 18.0;
 
+        // Default colors
         let border_c = SolidSource::from_unpremultiplied_argb(0xFF, 0x80, 0x80, 0x80);
         let background_c_default = SolidSource::from_unpremultiplied_argb(0xFF, 0xE0, 0xE0, 0xE0);
         let background_c_pressed = SolidSource::from_unpremultiplied_argb(0xFF, 0xA0, 0xA0, 0xF0);
         let text_c = SolidSource::from_unpremultiplied_argb(0xFF, 0x10, 0x10, 0x10);
 
-        let alt_bg = if self.left_alt_pressed { background_c_pressed } else { background_c_default };
-        let ctrl_bg = if self.left_ctrl_pressed { background_c_pressed } else { background_c_default };
+        let mut keys_to_draw: Vec<KeyDisplay> = Vec::new();
 
-        let keys_to_draw = vec![
-            KeyDisplay {
-                text: "Alt".to_string(),
-                center_x: width as f32 * 0.70, center_y: height as f32 * 0.60,
-                width: key_w, height: key_h, corner_radius: corner_r, border_thickness: border_t,
-                rotation_degrees: default_rot, text_size: txt_size,
-                border_color: border_c, background_color: alt_bg, text_color: text_c,
-            },
-            KeyDisplay {
-                text: "Ctrl".to_string(),
-                center_x: width as f32 * 0.30, center_y: height as f32 * 0.40,
-                width: key_w, height: key_h, corner_radius: corner_r, border_thickness: border_t,
-                rotation_degrees: default_rot - 5.0, text_size: txt_size,
-                border_color: border_c, background_color: ctrl_bg, text_color: text_c,
-            },
-        ];
+        for key_config in &self.config.key {
+            let is_pressed = *self.key_states.get(&key_config.keycode).unwrap_or(&false);
+            let background_color = if is_pressed { background_c_pressed } else { background_c_default };
+
+            // Apply scaling and offset
+            // Original x, y from config are treated as center points
+            let final_center_x = key_config.x * scale + offset_x;
+            let final_center_y = key_config.y * scale + offset_y;
+            let final_width = key_config.width * scale;
+            let final_height = key_config.height * scale;
+
+            let final_corner_radius = key_config.corner_radius.unwrap_or(DEFAULT_CORNER_RADIUS_UNSCALED) * scale;
+            let final_border_thickness = key_config.border_thickness.unwrap_or(DEFAULT_BORDER_THICKNESS_UNSCALED) * scale;
+            let final_text_size = key_config.text_size.unwrap_or(DEFAULT_TEXT_SIZE_UNSCALED) * scale;
+            let final_rotation = key_config.rotation_degrees.unwrap_or(DEFAULT_ROTATION_DEGREES);
+
+
+            let key_display = KeyDisplay {
+                text: key_config.name.clone(),
+                center_x: final_center_x,
+                center_y: final_center_y,
+                width: final_width,
+                height: final_height,
+                corner_radius: final_corner_radius,
+                border_thickness: final_border_thickness,
+                rotation_degrees: final_rotation, // Rotation is absolute
+                text_size: final_text_size,
+                border_color: border_c,
+                background_color,
+                text_color: text_c,
+            };
+            keys_to_draw.push(key_display);
+        }
 
         for key_spec in keys_to_draw {
             draw_single_key(&mut dt, &key_spec, &font);
@@ -328,10 +430,19 @@ fn main() {
     env_logger::init();
     log::info!("Starting Wayland application...");
 
+    // Load configuration
+    let config_path = "keys.toml";
+    let config_content = fs::read_to_string(config_path)
+        .expect(&format!("Failed to read configuration file: {}", config_path));
+    let app_config: AppConfig = toml::from_str(&config_content)
+        .expect("Failed to parse TOML configuration");
+
+    log::info!("Configuration loaded: {:?}", app_config);
+
     let conn = Connection::connect_to_env().unwrap();
     let mut event_queue = conn.new_event_queue();
     let qh = event_queue.handle();
-    let mut app_state = AppState::new();
+    let mut app_state = AppState::new(app_config.clone()); // Pass config to AppState
     let _registry = conn.display().get_registry(&qh, ());
     event_queue.roundtrip(&mut app_state).unwrap();
 
@@ -408,27 +519,34 @@ fn main() {
                     let key_code = key_event.key();
                     let key_state = key_event.key_state();
                     log::trace!("Key event: code {}, state {:?}", key_code, key_state);
-                    let mut changed = false;
-                    match key_code {
-                        29 => {
-                            let pressed = key_state == KeyState::Pressed;
-                            if app_state.left_ctrl_pressed != pressed {
-                                app_state.left_ctrl_pressed = pressed;
-                                changed = true;
-                                log::info!("Left Ctrl state changed: {}", pressed);
-                            }
+
+                    let pressed = key_state == KeyState::Pressed;
+                    let mut local_needs_redraw = false;
+
+                    if let Some(current_state) = app_state.key_states.get_mut(&key_code) {
+                        if *current_state != pressed {
+                            *current_state = pressed;
+                            local_needs_redraw = true;
+                            log::info!("Configured key {} state changed: {}", key_code, pressed);
                         }
-                        56 => {
-                            let pressed = key_state == KeyState::Pressed;
-                            if app_state.left_alt_pressed != pressed {
-                                app_state.left_alt_pressed = pressed;
-                                changed = true;
-                                log::info!("Left Alt state changed: {}", pressed);
-                            }
-                        }
-                        _ => {}
                     }
-                    if changed { needs_redraw = true; }
+                    // Example: Keep handling for Left Ctrl (29) and Left Alt (56) if they are not in config
+                    // This part can be removed if all interactive keys must be in the config.
+                    // else {
+                    //     match key_code {
+                    //         29 => { // Left Ctrl
+                    //             // This logic would be redundant if LCtrl is in config.
+                    //             // Only needed if we want to handle some keys outside config.
+                    //             log::debug!("Unconfigured LCtrl key event: state {}", pressed);
+                    //         }
+                    //         56 => { // Left Alt
+                    //             log::debug!("Unconfigured LAlt key event: state {}", pressed);
+                    //         }
+                    //         _ => {}
+                    //     }
+                    // }
+
+                    if local_needs_redraw { needs_redraw = true; }
                 }
             }
         }

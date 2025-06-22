@@ -1,0 +1,15 @@
+[[key]]
+name = "Q"
+width = 60
+height = 60
+x = 50
+y = 50
+keycode = 16
+
+[[key]]
+name = "W"
+width = 60
+height = 60
+x = 120
+y = 50
+keycode = 17
