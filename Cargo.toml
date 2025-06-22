@@ -1,0 +1,8 @@
+[package]
+name = "wayland-kbd-osd"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+log = { version = "0.4.27", features = ["std"] }
+wayland-client = { version = "0.31.10", features = ["log"] }
