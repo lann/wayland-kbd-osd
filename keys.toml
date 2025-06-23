@@ -693,3 +693,32 @@ top = 275.0
 width = 50.0
 height = 50.0
 keycode = "right"
+
+# Example overlay configuration
+# All fields are optional and have defaults.
+[overlay]
+# screen = "DP-1"       # Target a specific screen by name/description (e.g., "DP-1", "HDMI-A-2")
+# screen = "0"          # Or target by index (0, 1, ...)
+# position = "bottom-center" # Options: top, bottom, left, right, center,
+                            # top-left, top-center, top-right,
+                            # bottom-left, bottom-center, bottom-right,
+                            # center-left, center-right
+                            # Default: bottom-center
+
+# Size: can be pixels or ratio of screen dimension.
+# If one dimension is given, the other is calculated based on key layout aspect ratio.
+# If neither is given, default is height = 0.3 (30% of screen height), width derived.
+# size_width = 800 # In pixels
+# size_width = 0.5 # 50% of screen width
+size_height = 0.2 # 20% of screen height
+
+# Margins (in pixels) from the anchor point.
+# margin_top = 10
+# margin_right = 10
+# margin_bottom = 50
+# margin_left = 10
+
+# Background color of the overlay window.
+# Format: "#RRGGBB", "#RRGGBBAA", "#RGB", or "#RGBA"
+background_color_inactive = "#101010E0" # Dark semi-transparent grey
+# background_color_active = "#303030F0" # Currently unused for global overlay background
