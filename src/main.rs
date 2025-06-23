@@ -1497,34 +1497,47 @@ fn main() {
         };
 
         println!("\nKey Information (Layout from TOML, Text metrics simulated):");
-        println!("{:<20} | {:<25} | {:<10} | {:<10} | {:<15} | {:<10}",
-                 "Label (Name)", "Bounding Box (L,T,W,H)", "Keycode", "FontSz(pts)", "Final Text", "Truncated");
-        println!("{:-<20}-+-{:-<25}-+-{:-<10}-+-{:-<10}-+-{:-<15}-+-{:-<10}", "", "", "", "", "", "");
+        println!("{:<20} | {:<25} | {:<10} | {:<10} | {:<20}",
+                 "Label (Name)", "Bounding Box (L,T,R,B)", "Keycode", "Font Scale", "Truncated Label");
+        println!("{:-<20}-+-{:-<25}-+-{:-<10}-+-{:-<10}-+-{:-<20}", "", "", "", "", "");
 
         for key_config in &app_config.key {
-            let bbox_str = format!("{:.1},{:.1}, {:.1}x{:.1}",
+            let right_edge = key_config.left + key_config.width;
+            let bottom_edge = key_config.top + key_config.height;
+            let bbox_str = format!("{:.1},{:.1}, {:.1},{:.1}",
                                    key_config.left, key_config.top,
-                                   key_config.width, key_config.height);
+                                   right_edge, bottom_edge);
 
-            let initial_font_size = key_config.text_size.unwrap_or(DEFAULT_TEXT_SIZE_UNSCALED);
+            let initial_font_size = key_config.text_size.unwrap_or(DEFAULT_TEXT_SIZE_UNSCALED) as f64;
 
             match simulate_text_layout(key_config, &ft_face) {
                 Ok(text_check_result) => {
-                    println!("{:<20} | {:<25} | {:<10} | {:<10.1} | {:<15} | {:<10}",
+                    let font_scale = if initial_font_size > 0.0 {
+                        text_check_result.final_font_size_pts / initial_font_size
+                    } else {
+                        1.0 // Avoid division by zero, should not happen with validation
+                    };
+
+                    let truncated_label_display = if text_check_result.truncated_chars > 0 || !text_check_result.final_text.eq(&key_config.name) {
+                        text_check_result.final_text
+                    } else {
+                        "".to_string() // Empty if not truncated from original name
+                    };
+
+                    println!("{:<20} | {:<25} | {:<10} | {:<10.2} | {:<20}",
                              key_config.name,
                              bbox_str,
                              key_config.keycode,
-                             text_check_result.final_font_size_pts, // Show the font size that was actually used for metrics
-                             format!("'{}'",text_check_result.final_text),
-                             text_check_result.truncated_chars
+                             font_scale,
+                             truncated_label_display
                         );
                 }
                 Err(e) => {
-                     println!("{:<20} | {:<25} | {:<10} | {:<10.1} | Error simulating text: {} ",
+                     println!("{:<20} | {:<25} | {:<10} | {:<10.2} | Error simulating text: {} ",
                              key_config.name,
                              bbox_str,
                              key_config.keycode,
-                             initial_font_size,
+                             1.0, // Default scale in case of error
                              e
                         );
                 }
