@@ -56,6 +56,8 @@ After ensuring group membership, the tests, including the startup crash detectio
 cargo test
 ```
 
+**IMPORTANT:** `cargo test` MUST be run to validate any code changes before submitting them. All tests should pass.
+
 ## Visual Inspection with `take_screenshot.sh`
 
 A script named `take_screenshot.sh` is provided to help with visual inspection of `wayland-kbd-osd` running in a headless Sway environment. This is particularly useful for agents or automated systems that need to verify the visual output of the OSD.

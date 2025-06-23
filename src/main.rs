@@ -1740,16 +1740,18 @@ fn main() {
             );
             // Configure the layer surface
             let anchor = match app_state.config.overlay.position {
-                OverlayPosition::Top => zwlr_layer_surface_v1::Anchor::Top,
-                OverlayPosition::Bottom => zwlr_layer_surface_v1::Anchor::Bottom,
+                OverlayPosition::Top | OverlayPosition::TopCenter => {
+                    zwlr_layer_surface_v1::Anchor::Top | zwlr_layer_surface_v1::Anchor::Left | zwlr_layer_surface_v1::Anchor::Right
+                }
+                OverlayPosition::Bottom | OverlayPosition::BottomCenter => {
+                    zwlr_layer_surface_v1::Anchor::Bottom | zwlr_layer_surface_v1::Anchor::Left | zwlr_layer_surface_v1::Anchor::Right
+                }
                 OverlayPosition::Left => zwlr_layer_surface_v1::Anchor::Left,
                 OverlayPosition::Right => zwlr_layer_surface_v1::Anchor::Right,
-                OverlayPosition::Center => zwlr_layer_surface_v1::Anchor::empty(), // Centered by default if no anchor
+                OverlayPosition::Center => zwlr_layer_surface_v1::Anchor::empty(), // Centered by default if no anchor. If set_size(0,0) this might need L+R too, but error was for Bottom.
                 OverlayPosition::TopLeft => zwlr_layer_surface_v1::Anchor::Top | zwlr_layer_surface_v1::Anchor::Left,
-                OverlayPosition::TopCenter => zwlr_layer_surface_v1::Anchor::Top, // Rely on centering for horizontal
                 OverlayPosition::TopRight => zwlr_layer_surface_v1::Anchor::Top | zwlr_layer_surface_v1::Anchor::Right,
                 OverlayPosition::BottomLeft => zwlr_layer_surface_v1::Anchor::Bottom | zwlr_layer_surface_v1::Anchor::Left,
-                OverlayPosition::BottomCenter => zwlr_layer_surface_v1::Anchor::Bottom, // Rely on centering for horizontal
                 OverlayPosition::BottomRight => zwlr_layer_surface_v1::Anchor::Bottom | zwlr_layer_surface_v1::Anchor::Right,
                 OverlayPosition::CenterLeft => zwlr_layer_surface_v1::Anchor::Left, // Rely on centering for vertical
                 OverlayPosition::CenterRight => zwlr_layer_surface_v1::Anchor::Right, // Rely on centering for vertical
