@@ -259,11 +259,56 @@ impl input::LibinputInterface for MyLibinputInterface {
     }
 }
 
+// Dispatcher for zwlr_layer_surface_v1
+impl Dispatch<zwlr_layer_surface_v1::ZwlrLayerSurfaceV1, ()> for AppState {
+    fn event(
+        state: &mut AppState,
+        layer_surface: &zwlr_layer_surface_v1::ZwlrLayerSurfaceV1,
+        event: zwlr_layer_surface_v1::Event,
+        _data: &(),
+        _conn: &Connection,
+        qh: &QueueHandle<AppState>,
+    ) {
+        match event {
+            zwlr_layer_surface_v1::Event::Configure { serial, width, height } => {
+                log::info!(
+                    "LayerSurface Configure: serial: {}, width: {}, height: {}",
+                    serial, width, height
+                );
+                // Update size if compositor suggests a new one and it's not zero
+                if width > 0 { state.configured_width = width as i32; }
+                if height > 0 { state.configured_height = height as i32; }
+
+                // Client must ack the configure
+                layer_surface.ack_configure(serial);
+
+                // Mark that a redraw is needed due to potential size change
+                state.needs_redraw = true;
+                // Explicitly draw if the surface is configured and ready
+                if state.surface.is_some() {
+                     log::debug!("LayerSurface Configure event: triggering draw and setting needs_redraw to false.");
+                     state.draw(qh); // Draw immediately
+                     state.needs_redraw = false; // Reset as draw was just called
+                }
+            }
+            zwlr_layer_surface_v1::Event::Closed => {
+                log::info!("LayerSurface Closed event received. Application will exit.");
+                state.running = false; // Signal the main loop to stop
+            }
+            _ => {
+                log::trace!("Unhandled zwlr_layer_surface_v1 event: {:?}", event);
+            }
+        }
+    }
+}
+
 struct AppState {
     compositor: Option<wl_compositor::WlCompositor>,
     shm: Option<wl_shm::WlShm>,
     xdg_wm_base: Option<xdg_wm_base::XdgWmBase>,
+    layer_shell: Option<zwlr_layer_shell_v1::ZwlrLayerShellV1>, // Added for overlay mode
     surface: Option<wl_surface::WlSurface>,
+    layer_surface: Option<zwlr_layer_surface_v1::ZwlrLayerSurfaceV1>, // Added for overlay mode
     buffer: Option<wl_buffer::WlBuffer>,
     mmap: Option<MmapMut>,
     temp_file: Option<std::fs::File>, // Added for persistent temp file
@@ -295,7 +340,9 @@ impl AppState {
             compositor: None,
             shm: None,
             xdg_wm_base: None,
+            layer_shell: None, // Initialize new field
             surface: None,
+            layer_surface: None, // Initialize new field
             buffer: None,
             mmap: None,
             temp_file: None,
@@ -609,10 +656,19 @@ impl Dispatch<wl_registry::WlRegistry, ()> for AppState {
                 "wl_compositor" => { state.compositor = Some(registry.bind::<wl_compositor::WlCompositor, (), AppState>(name, std::cmp::min(version,5), qh, ())); }
                 "wl_shm" => { state.shm = Some(registry.bind::<wl_shm::WlShm, (), AppState>(name, std::cmp::min(version,1), qh, ())); }
                 "xdg_wm_base" => { state.xdg_wm_base = Some(registry.bind::<xdg_wm_base::XdgWmBase, (), AppState>(name, std::cmp::min(version,3), qh, ())); }
-                _ => {}
+                "zwlr_layer_shell_v1" => {
+                    // Layer shell is optional, so we check its version. Version 4 is the latest for the XML I reviewed.
+                    // The wayland-protocols crate for 0.31.x seems to generate bindings against version 4.
+                    state.layer_shell = Some(registry.bind::<zwlr_layer_shell_v1::ZwlrLayerShellV1, (), AppState>(name, std::cmp::min(version,4), qh, ()));
+                    log::info!("Bound zwlr_layer_shell_v1 version {}", std::cmp::min(version,4));
+                }
+                _ => {
+                    log::trace!("Ignoring unknown global: {} version {}", interface, version);
+                }
             }
         } else if let wl_registry::Event::GlobalRemove { name } = event {
             log::info!("Global removed: ID {}", name);
+            // TODO: Consider if we need to None-out globals if they are removed, e.g. layer_shell
         }
     }
 }
@@ -626,7 +682,25 @@ impl Dispatch<wl_buffer::WlBuffer, ()> for AppState {
         if let wl_buffer::Event::Release = event { log::debug!("Buffer {:?} released", buffer.id()); }
     }
 }
+
+// Dispatcher for zwlr_layer_shell_v1
+impl Dispatch<zwlr_layer_shell_v1::ZwlrLayerShellV1, ()> for AppState {
+    fn event(
+        _state: &mut AppState,
+        _proxy: &zwlr_layer_shell_v1::ZwlrLayerShellV1,
+        event: zwlr_layer_shell_v1::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<AppState>,
+    ) {
+        // zwlr_layer_shell_v1 has no events for the client to handle
+        log::trace!("zwlr_layer_shell_v1 event: {:?}", event);
+    }
+}
+
 /// Command-line arguments
+use wayland_protocols::wlr::layer_shell::unstable::v1::client::{zwlr_layer_shell_v1, zwlr_layer_surface_v1};
+
 #[derive(Parser, Debug)]
 #[clap(author, version, about, long_about = None)]
 struct Cli {
@@ -637,6 +711,10 @@ struct Cli {
     /// Path to the configuration file
     #[clap(long, value_parser, default_value = "keys.toml")]
     config: String,
+
+    /// Run in overlay mode (requires compositor support for wlr-layer-shell)
+    #[clap(long)]
+    overlay: bool,
 }
 
 // Helper function for --check: Validate configuration
@@ -1046,13 +1124,52 @@ fn main() {
 
     let surface = app_state.compositor.as_ref().unwrap().create_surface(&qh, ());
     app_state.surface = Some(surface.clone());
-    let xdg_surface = app_state.xdg_wm_base.as_ref().unwrap().get_xdg_surface(&surface, &qh, ());
-    let toplevel = xdg_surface.get_toplevel(&qh, ());
-    toplevel.set_title("Wayland Keyboard OSD".to_string());
-    surface.commit(); // Commit to make the surface known to the compositor
+
+    if cli.overlay {
+        log::info!("Overlay mode requested. Attempting to use wlr-layer-shell.");
+        if let Some(layer_shell) = app_state.layer_shell.as_ref() {
+            let layer_surface_obj = layer_shell.get_layer_surface(
+                &surface,
+                None, // output: None means compositor chooses
+                zwlr_layer_shell_v1::Layer::Overlay,
+                "wayland-kbd-osd".to_string(), // namespace
+                &qh,
+                ()
+            );
+            // Configure the layer surface
+            layer_surface_obj.set_anchor(zwlr_layer_surface_v1::Anchor::Bottom);
+            // Example: Position 20 pixels up from the bottom edge, full width if size is 0,0 and anchor left/right also set.
+            // For now, just bottom anchor. Margins can be set here if needed:
+            // layer_surface_obj.set_margin(0, 0, 20, 0); // top, right, bottom, left
+            layer_surface_obj.set_keyboard_interactivity(zwlr_layer_surface_v1::KeyboardInteractivity::None);
+            layer_surface_obj.set_exclusive_zone(0); // Do not reserve space
+
+            // Set initial size. Using configured_width/height.
+            // Passing 0,0 would let the compositor suggest a size or fit to content if anchored on all sides.
+            // For an overlay, specific sizing is often desired.
+            layer_surface_obj.set_size(app_state.configured_width as u32, app_state.configured_height as u32);
+
+            app_state.layer_surface = Some(layer_surface_obj);
+            log::info!("Created and configured layer surface for overlay mode.");
+        } else {
+            log::error!("--overlay flag was used, but zwlr_layer_shell_v1 is not available from the compositor. Falling back to normal window mode.");
+            // Fallback to XDG toplevel
+            let xdg_surface = app_state.xdg_wm_base.as_ref().unwrap().get_xdg_surface(&surface, &qh, ());
+            let toplevel = xdg_surface.get_toplevel(&qh, ());
+            toplevel.set_title("Wayland Keyboard OSD (Fallback)".to_string());
+            app_state.surface = Some(surface.clone()); // Ensure surface is set for XDG path
+        }
+    } else {
+        log::info!("Normal window mode requested (XDG shell).");
+        let xdg_surface = app_state.xdg_wm_base.as_ref().unwrap().get_xdg_surface(&surface, &qh, ());
+        let toplevel = xdg_surface.get_toplevel(&qh, ());
+        toplevel.set_title("Wayland Keyboard OSD".to_string());
+    }
+
+    surface.commit(); // Commit to make the surface known to the compositor and apply layer/xdg settings
 
     // Dispatch events once to process initial configure and draw the window.
-    log::info!("Initial surface commit done. Dispatching events to catch initial XDG configure...");
+    log::info!("Initial surface commit done. Dispatching events to catch initial configure...");
     if event_queue.roundtrip(&mut app_state).is_err() {
         log::error!("Error during roundtrip after surface commit (waiting for initial configure).");
         // Depending on the error, might want to exit or handle differently
