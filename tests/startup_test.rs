@@ -5,7 +5,7 @@
 #[cfg(test)]
 mod tests {
     use std::io::{BufRead, BufReader};
-    use std::process::{Command, Stdio, Child};
+    use std::process::{Command, Stdio}; // Removed Child
     use std::sync::{Arc, Mutex};
     use std::thread;
     use std::time::Duration;
@@ -91,7 +91,7 @@ mod tests {
         println!("[TEST] Starting application with WAYLAND_DISPLAY={}", wayland_display_name_str);
         let mut app_process = Command::new("cargo")
             .arg("run")
-            .env("WAYLAND_DISPLAY", &wayland_display_name) // Use the assumed socket name
+            .env("WAYLAND_DISPLAY", wayland_display_name_str) // Use the extracted string
             .stdout(Stdio::inherit()) // Inherit App's stdout
             .stderr(Stdio::inherit()) // Inherit App's stderr
             .spawn()
