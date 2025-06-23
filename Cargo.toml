@@ -10,9 +10,11 @@ wayland-protocols = { version = "0.31.2", features = ["client", "unstable"] }
 tempfile = "3.10.1"
 memmap2 = "0.9.4"
 env_logger = "0.11.3"
-raqote = "0.8.5"
-rusttype = "0.9.3"
-euclid = "0.22.11" # For Angle
+cairo-rs = { version = "0.19.0", default-features = false, features = ["freetype", "png"] }
+freetype-rs = "0.35.0" # For loading TTF fonts for Cairo - Downgraded to match cairo-rs internal dep
+# raqote = "0.8.5" # Replaced by cairo-rs
+# rusttype = "0.9.3" # Replaced by cairo-rs
+# euclid = "0.22.11" # No longer needed after switching to Cairo's rotation
 input = "0.9.1"
 libc = "0.2"
 toml = "0.8"

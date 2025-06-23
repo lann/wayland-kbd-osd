@@ -15,7 +15,7 @@ On Debian-based systems (like Ubuntu), you can install the non-Rust dependencies
 
 ```bash
 sudo apt-get update
-sudo apt-get install -y sway libudev-dev libinput-dev
+sudo apt-get install -y sway libudev-dev libinput-dev libcairo2-dev libfreetype6-dev libfontconfig1-dev
 ```
 
 ## Running Tests
@@ -63,7 +63,8 @@ The script requires the following to be installed and accessible in your `PATH`:
 On Debian-based systems, these can be installed with:
 ```bash
 sudo apt-get update
-sudo apt-get install -y sway grim dbus-x11 cargo # Add other build deps for wayland-kbd-osd if not already listed
+# Ensure all build dependencies from the "Development Environment Setup" section are also installed for wayland-kbd-osd
+sudo apt-get install -y sway grim dbus-x11 cargo
 ```
 Ensure `wayland-kbd-osd` is built (e.g., `cargo build --release`). The script expects the binary at `target/release/wayland-kbd-osd`.
 
@@ -110,7 +111,8 @@ The script requires the following to be installed and accessible in your `PATH`:
 On Debian-based systems, these can typically be installed with:
 ```bash
 sudo apt-get update
-sudo apt-get install -y sway dbus-x11 cargo # Plus libudev-dev, libinput-dev if not already installed
+# Ensure all build dependencies from the "Development Environment Setup" section are also installed
+sudo apt-get install -y sway dbus-x11 cargo
 ```
 
 **Usage:**

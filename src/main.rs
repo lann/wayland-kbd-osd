@@ -13,9 +13,11 @@ use std::process; // For exiting gracefully on config error
 mod keycodes; // Our new module
 
 // Graphics and Font rendering
-use raqote::{SolidSource, PathBuilder, DrawOptions, StrokeStyle, Transform, Source};
-use rusttype::{Font, Scale, point, PositionedGlyph, OutlineBuilder};
-use euclid::Angle;
+// use raqote::{SolidSource, PathBuilder, DrawOptions, StrokeStyle, Transform, Source}; // Replaced by cairo
+// use rusttype::{Font, Scale, point, PositionedGlyph, OutlineBuilder}; // Replaced by cairo
+use cairo::{Context, ImageSurface, Format, FontFace as CairoFontFace}; // Added for cairo-rs (Removed FtFontFace, FontSlant, FontWeight, Surface)
+use freetype::{Library as FreeTypeLibrary}; // Added for freetype-rs, removed unused FreeTypeLoadFlag
+// use euclid::Angle; // No longer needed
 
 // Configuration Structs
 #[derive(Deserialize, Debug, Clone)]
@@ -59,91 +61,86 @@ struct KeyDisplay {
     border_thickness: f32,
     rotation_degrees: f32,
     text_size: f32,
-    border_color: SolidSource,
-    background_color: SolidSource,
-    text_color: SolidSource,
+    // Colors are now (R, G, B, A) tuples with values from 0.0 to 1.0
+    border_color: (f64, f64, f64, f64),
+    background_color: (f64, f64, f64, f64),
+    text_color: (f64, f64, f64, f64),
 }
 
-fn draw_single_key(
-    dt: &mut raqote::DrawTarget,
+// fn draw_single_key( // This function will be rewritten for Cairo
+//     dt: &mut raqote::DrawTarget,
+//     key: &KeyDisplay,
+//     font: &Font<'_>
+// ) {
+    // ... old raqote implementation ...
+// }
+
+// New function using Cairo
+fn draw_single_key_cairo(
+    ctx: &Context,
     key: &KeyDisplay,
-    font: &Font<'_>
 ) {
-    let scale = Scale::uniform(key.text_size);
-    let v_metrics = font.v_metrics(scale);
-    let glyphs: Vec<PositionedGlyph<'_>> = font
-        .layout(&key.text, scale, point(0.0, 0.0 + v_metrics.ascent))
-        .collect();
+    let x = key.center_x as f64;
+    let y = key.center_y as f64;
+    let width = key.width as f64;
+    let height = key.height as f64;
+    let corner_radius = key.corner_radius as f64;
+    let border_thickness = key.border_thickness as f64;
+    let rotation_radians = key.rotation_degrees.to_radians() as f64;
 
-    let text_width_pixels = glyphs
-        .iter()
-        .rev()
-        .filter_map(|g| g.pixel_bounding_box().map(|bb| bb.max.x as f32))
-        .next()
-        .unwrap_or(0.0);
+    ctx.save().expect("Failed to save cairo context state");
 
-    let transform = Transform::translation(key.center_x, key.center_y)
-        .then_rotate(Angle::radians(key.rotation_degrees.to_radians()))
-        .then_translate(raqote::Vector::new(-key.width / 2.0, -key.height / 2.0));
+    // Set up transformation: translate to key center, rotate, then translate to top-left of key bounding box
+    ctx.translate(x, y);
+    ctx.rotate(rotation_radians);
+    ctx.translate(-width / 2.0, -height / 2.0);
 
-    dt.set_transform(&transform);
+    // Draw rounded rectangle path
+    // Cairo's `arc` is clockwise. `arc_negative` is counter-clockwise.
+    // Angles are in radians. 0 is east, PI/2 is south, PI is west, 3*PI/2 is north.
+    ctx.new_sub_path();
+    ctx.arc(width - corner_radius, corner_radius, corner_radius, -std::f64::consts::PI / 2.0, 0.0); // Top-right corner
+    ctx.arc(width - corner_radius, height - corner_radius, corner_radius, 0.0, std::f64::consts::PI / 2.0); // Bottom-right corner
+    ctx.arc(corner_radius, height - corner_radius, corner_radius, std::f64::consts::PI / 2.0, std::f64::consts::PI); // Bottom-left corner
+    ctx.arc(corner_radius, corner_radius, corner_radius, std::f64::consts::PI, 3.0 * std::f64::consts::PI / 2.0); // Top-left corner
+    ctx.close_path();
 
-    let mut pb = PathBuilder::new();
-    pb.move_to(0.0 + key.corner_radius, 0.0);
-    pb.line_to(key.width - key.corner_radius, 0.0);
-    pb.quad_to(key.width, 0.0, key.width, key.corner_radius);
-    pb.line_to(key.width, key.height - key.corner_radius);
-    pb.quad_to(key.width, key.height, key.width - key.corner_radius, key.height);
-    pb.line_to(key.corner_radius, key.height);
-    pb.quad_to(0.0, key.height, 0.0, key.height - key.corner_radius);
-    pb.line_to(0.0, key.corner_radius);
-    pb.quad_to(0.0, 0.0, key.corner_radius, 0.0);
-    pb.close();
-    let key_path = pb.finish();
+    // Fill
+    let (r, g, b, a) = key.background_color;
+    ctx.set_source_rgba(r, g, b, a);
+    ctx.fill_preserve().expect("Cairo fill failed"); // Use fill_preserve to keep path for stroke
 
-    dt.fill(&key_path, &Source::Solid(key.background_color), &DrawOptions::default());
-    dt.stroke(
-        &key_path,
-        &Source::Solid(key.border_color),
-        &StrokeStyle {
-            width: key.border_thickness,
-            ..Default::default()
-        },
-        &DrawOptions::default(),
-    );
+    // Stroke
+    let (r, g, b, a) = key.border_color;
+    ctx.set_source_rgba(r, g, b, a);
+    ctx.set_line_width(border_thickness);
+    ctx.stroke().expect("Cairo stroke failed");
 
-    let text_x = (key.width - text_width_pixels) / 2.0;
-    let text_y = (key.height - key.text_size) / 2.0 + v_metrics.ascent; // This positions the baseline correctly
+    // Text drawing
+    // Font face and size should be set on the context before this function is called.
+    // Example: ctx.set_font_face(cairo_font_face); ctx.set_font_size(key.text_size as f64);
+    let (r, g, b, a) = key.text_color;
+    ctx.set_source_rgba(r, g, b, a);
 
-    // Base transformation for the entire text block (aligns it within the key)
-    let base_text_transform = transform.then_translate(raqote::Vector::new(text_x, text_y));
+    let text_extents = ctx.text_extents(&key.text).expect("Failed to get text extents");
 
-    for glyph_instance in glyphs {
-        if let Some(bounding_box) = glyph_instance.pixel_bounding_box() {
-            // Create a specific transform for this glyph
-            // The glyphs from font.layout are already positioned relative to the layout's origin (0, ascent_of_first_line)
-            // So, we just need to apply the base_text_transform to move the whole block,
-            // and then rusttype's positioning for individual glyphs takes care of the rest *if drawn relative to that point*.
-            // Raqote draws paths relative to the current transform's origin.
-            // build_outline builds the glyph at (0,0). So we need to translate it to its correct position.
+    // Calculate text position to center it
+    // text_extents.x_bearing is the horizontal displacement from the origin to the leftmost part of the glyphs.
+    // text_extents.width is the width of the inked area.
+    // text_extents.y_bearing is the vertical displacement from the origin to the topmost part of the glyphs.
+    // text_extents.height is the height of the inked area.
+    // For horizontal centering:
+    let text_x = (width - text_extents.width()) / 2.0 - text_extents.x_bearing();
+    // For vertical centering (approximate, depends on font metrics):
+    // Ascent is roughly -text_extents.y_bearing()
+    // Descent is roughly text_extents.height() + text_extents.y_bearing()
+    // Centering the middle of the inked height:
+    let text_y = (height - text_extents.height()) / 2.0 - text_extents.y_bearing();
 
-            let glyph_specific_transform = base_text_transform
-                .then_translate(raqote::Vector::new(bounding_box.min.x as f32, bounding_box.min.y as f32));
+    ctx.move_to(text_x, text_y);
+    ctx.show_text(&key.text).expect("Cairo show_text failed");
 
-            dt.set_transform(&glyph_specific_transform);
-
-            let mut glyph_pb = PathBuilder::new();
-            // build_outline for unpositioned glyph draws it as if its origin is (0,0)
-            if glyph_instance.unpositioned().build_outline(&mut PathBuilderSink(&mut glyph_pb)) {
-                let glyph_path = glyph_pb.finish();
-                if !glyph_path.ops.is_empty() {
-                    dt.fill(&glyph_path, &Source::Solid(key.text_color), &DrawOptions::default());
-                }
-            }
-        }
-    }
-    // Reset transform for subsequent drawing operations outside this function if any were planned for the same dt
-    // dt.set_transform(&Transform::identity()); // Or back to `transform` if key drawing continues
+    ctx.restore().expect("Failed to restore cairo context state");
 }
 
 use std::os::unix::io::{AsRawFd, BorrowedFd, OwnedFd};
@@ -256,17 +253,51 @@ impl AppState {
             self.temp_file = Some(temp_f);
         }
 
-        let mmap = self.mmap.as_mut().unwrap(); // Now safe to unwrap
+        // self.mmap is guaranteed to be Some by the logic above.
+        // let mmap = self.mmap.as_mut().unwrap(); // This variable was unused, mmap_data below is used.
         let temp_file_fd = self.temp_file.as_ref().unwrap().as_raw_fd();
 
         // Create a new pool and buffer for each draw. This is typical.
-        // The expensive part was file creation/mapping, not pool/buffer creation.
         let pool = unsafe { shm.create_pool(BorrowedFd::borrow_raw(temp_file_fd), size as i32, qh, ()) };
         let buffer = pool.create_buffer(0, width, height, stride, wl_shm::Format::Argb8888, qh, ());
         pool.destroy(); // Pool can be destroyed after buffer creation
 
-        let mut dt = raqote::DrawTarget::new(width, height);
-        dt.clear(SolidSource::from_unpremultiplied_argb(0x00, 0x00, 0x00, 0x00));
+        // Get a mutable pointer to the mmap data for Cairo.
+        // This is unsafe because we are responsible for ensuring the data outlives the surface.
+        // In this case, the surface (`cairo_surface`) is local to this `draw` method,
+        // and `self.mmap` (the source of the data) outlives this method.
+        let mmap_ptr = self.mmap.as_mut().unwrap().as_mut_ptr();
+
+        let cairo_surface = match unsafe {
+            ImageSurface::create_for_data_unsafe(
+                mmap_ptr,           // Raw pointer to the data
+                Format::ARgb32,     // Corresponds to wl_shm::Format::Argb8888
+                width,
+                height,
+                stride,
+            )
+        } {
+            Ok(s) => s,
+            Err(e) => {
+                log::error!("Failed to create Cairo ImageSurface from mmap data (unsafe): {:?}", e);
+                surface.attach(Some(&buffer), 0, 0);
+                surface.damage_buffer(0, 0, width, height);
+                surface.commit();
+                if let Some(old_buffer) = self.buffer.replace(buffer) {
+                    old_buffer.destroy();
+                }
+                return;
+            }
+        };
+
+        let ctx = Context::new(&cairo_surface).expect("Failed to create Cairo Context");
+
+        // Clear the surface (transparent black)
+        ctx.save().unwrap(); // Save context state before changing operator
+        ctx.set_source_rgba(0.0, 0.0, 0.0, 0.0); // Transparent
+        ctx.set_operator(cairo::Operator::Source); // Replace content
+        ctx.paint().expect("Cairo paint (clear) failed");
+        ctx.restore().unwrap(); // Restore operator and other states
 
         let scale: f32;
         let offset_x: f32;
@@ -313,8 +344,15 @@ impl AppState {
             offset_y = padding + (drawable_height - scaled_layout_height) / 2.0 - (min_coord_y * scale);
         }
 
-        let font_data = include_bytes!("../default-font/DejaVuSansMono.ttf");
-        let font = Font::try_from_bytes(font_data as &[u8]).expect("Error constructing Font");
+        let font_data: &[u8] = include_bytes!("../default-font/DejaVuSansMono.ttf");
+        let ft_library = FreeTypeLibrary::init().expect("Failed to init FreeType library");
+        let ft_face = ft_library.new_memory_face(font_data.to_vec(), 0).expect("Failed to load font from memory");
+        // We might want to set char size here on ft_face if needed, e.g., ft_face.set_pixel_sizes(0, 32)
+        // However, Cairo's context.set_font_size() is usually preferred.
+        // Note: create_from_ft might require specific freetype features enabled in cairo-rs or specific versions.
+        // If this exact method name is wrong for cairo-rs 0.19 + freetype-rs 0.35, it will need adjustment.
+        let cairo_font_face = CairoFontFace::create_from_ft(&ft_face)
+            .expect("Failed to create Cairo font face from FT face");
 
         // Default appearance values (unscaled)
         const DEFAULT_CORNER_RADIUS_UNSCALED: f32 = 8.0;
@@ -322,17 +360,18 @@ impl AppState {
         const DEFAULT_ROTATION_DEGREES: f32 = 0.0; // Rotation is not scaled
         const DEFAULT_TEXT_SIZE_UNSCALED: f32 = 18.0;
 
-        // Default colors
-        let border_c = SolidSource::from_unpremultiplied_argb(0xFF, 0x80, 0x80, 0x80);
-        let background_c_default = SolidSource::from_unpremultiplied_argb(0xFF, 0xE0, 0xE0, 0xE0);
-        let background_c_pressed = SolidSource::from_unpremultiplied_argb(0xFF, 0xA0, 0xA0, 0xF0);
-        let text_c = SolidSource::from_unpremultiplied_argb(0xFF, 0x10, 0x10, 0x10);
+        // Default colors for Cairo: (R, G, B, A) with values from 0.0 to 1.0
+        let border_c_cairo = (0x80 as f64 / 255.0, 0x80 as f64 / 255.0, 0x80 as f64 / 255.0, 0xFF as f64 / 255.0);
+        let background_c_default_cairo = (0xE0 as f64 / 255.0, 0xE0 as f64 / 255.0, 0xE0 as f64 / 255.0, 0xFF as f64 / 255.0);
+        let background_c_pressed_cairo = (0xA0 as f64 / 255.0, 0xA0 as f64 / 255.0, 0xF0 as f64 / 255.0, 0xFF as f64 / 255.0);
+        let text_c_cairo = (0x10 as f64 / 255.0, 0x10 as f64 / 255.0, 0x10 as f64 / 255.0, 0xFF as f64 / 255.0);
+
 
         let mut keys_to_draw: Vec<KeyDisplay> = Vec::new();
 
         for key_config in &self.config.key {
             let is_pressed = *self.key_states.get(&key_config.keycode).unwrap_or(&false);
-            let background_color = if is_pressed { background_c_pressed } else { background_c_default };
+            let background_color = if is_pressed { background_c_pressed_cairo } else { background_c_default_cairo };
 
             // Apply scaling and offset
             // Original x, y from config are treated as center points
@@ -357,36 +396,31 @@ impl AppState {
                 border_thickness: final_border_thickness,
                 rotation_degrees: final_rotation, // Rotation is absolute
                 text_size: final_text_size,
-                border_color: border_c,
-                background_color,
-                text_color: text_c,
+                border_color: border_c_cairo,
+                background_color, // This is already background_c_pressed_cairo or background_c_default_cairo
+                text_color: text_c_cairo,
             };
             keys_to_draw.push(key_display);
         }
 
+        // Set the font face once on the context (assuming it's the same for all keys)
+        ctx.set_font_face(&cairo_font_face);
+
         for key_spec in keys_to_draw {
-            draw_single_key(&mut dt, &key_spec, &font);
+            // Set font size for each key specifically, as it can vary
+            ctx.set_font_size(key_spec.text_size as f64);
+            draw_single_key_cairo(&ctx, &key_spec);
         }
 
-        dt.set_transform(&Transform::identity());
+        // Ensure all drawing operations are written to the underlying buffer.
+        // For an ImageSurface created with create_for_data, operations are generally direct.
+        // However, calling flush can be a good practice to ensure completion.
+        cairo_surface.flush();
 
-        let dt_buffer = dt.get_data_u8();
-        for y_idx in 0..height {
-            for x_idx in 0..width {
-                let dt_buf_idx = (y_idx * width + x_idx) as usize * 4;
-                let mmap_buf_idx = (y_idx * stride + x_idx * 4) as usize;
-                if dt_buf_idx + 3 < dt_buffer.len() && mmap_buf_idx + 3 < mmap.len() {
-                    let a = dt_buffer[dt_buf_idx + 3];
-                    let r = dt_buffer[dt_buf_idx + 2];
-                    let g = dt_buffer[dt_buf_idx + 1];
-                    let b = dt_buffer[dt_buf_idx + 0];
-                    let pixel_value = (a as u32) << 24 | (r as u32) << 16 | (g as u32) << 8 | (b as u32);
-                    mmap[mmap_buf_idx..mmap_buf_idx+4].copy_from_slice(&pixel_value.to_le_bytes());
-                }
-            }
-        }
+        // The manual pixel copy loop is no longer needed as Cairo draws directly into mmap_slice.
+        // The mmap_slice was a mutable borrow from self.mmap.as_mut().unwrap(), so changes are reflected.
 
-        log::info!("Drawing content");
+        log::info!("Drawing content with Cairo complete.");
         surface.attach(Some(&buffer), 0, 0);
         surface.damage_buffer(0, 0, width, height);
         surface.commit();
@@ -401,15 +435,15 @@ impl AppState {
     }
 }
 
-struct PathBuilderSink<'a>(&'a mut raqote::PathBuilder);
+// struct PathBuilderSink<'a>(&'a mut raqote::PathBuilder); // Removed, was for raqote/rusttype
 
-impl<'a> OutlineBuilder for PathBuilderSink<'a> {
-    fn move_to(&mut self, x: f32, y: f32) { self.0.move_to(x, y); }
-    fn line_to(&mut self, x: f32, y: f32) { self.0.line_to(x, y); }
-    fn quad_to(&mut self, x1: f32, y1: f32, x: f32, y: f32) { self.0.quad_to(x1, y1, x, y); }
-    fn curve_to(&mut self, x1: f32, y1: f32, x2: f32, y2: f32, x: f32, y: f32) { self.0.cubic_to(x1, y1, x2, y2, x, y); }
-    fn close(&mut self) { self.0.close(); }
-}
+// impl<'a> OutlineBuilder for PathBuilderSink<'a> { // Removed
+//     fn move_to(&mut self, x: f32, y: f32) { self.0.move_to(x, y); }
+//     fn line_to(&mut self, x: f32, y: f32) { self.0.line_to(x, y); }
+//     fn quad_to(&mut self, x1: f32, y1: f32, x: f32, y: f32) { self.0.quad_to(x1, y1, x, y); }
+//     fn curve_to(&mut self, x1: f32, y1: f32, x2: f32, y2: f32, x: f32, y: f32) { self.0.cubic_to(x1, y1, x2, y2, x, y); }
+//     fn close(&mut self) { self.0.close(); }
+// }
 
 impl Dispatch<xdg_wm_base::XdgWmBase, ()> for AppState {
     fn event( _state: &mut AppState, proxy: &xdg_wm_base::XdgWmBase, event: xdg_wm_base::Event, _data: &(), _conn: &Connection, _qh: &QueueHandle<AppState>) {
