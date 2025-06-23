@@ -4,18 +4,34 @@ This document provides instructions for software agents working with the `waylan
 
 ## Development Environment Setup
 
-To build and test this project, you'll need the following dependencies:
-
-*   **Rust:** Install Rust using [rustup](https://rustup.rs/).
-*   **Sway:** A Wayland compositor. Used for running tests in a headless environment.
-*   **libudev-dev:** Development files for libudev.
-*   **libinput-dev:** Development files for libinput.
-
-On Debian-based systems (like Ubuntu), you can install the non-Rust dependencies with:
+**IMPORTANT:** Start by running the `install-dev-deps.sh` script to ensure all system-level dependencies are installed for your distribution:
 
 ```bash
+./install-dev-deps.sh
+```
+This script attempts to detect your Linux distribution and install dependencies using the appropriate package manager. If your distribution is not supported, it will list the required dependencies. If you update this script or pull changes that modify it, please re-run it.
+
+The script handles most dependencies. However, **Rust itself must be installed separately using [rustup](https://rustup.rs/)**. The `install-dev-deps.sh` script may install `cargo` if it's a system package, but `rustup` is the recommended way to manage Rust versions.
+
+After running the script and ensuring Rust is installed, your environment should be set up. The core dependencies managed by the script include:
+
+*   **Sway:** A Wayland compositor. Used for running tests in a headless environment.
+*   **libudev-dev** (or equivalent): Development files for libudev.
+*   **libinput-dev** (or equivalent): Development files for libinput.
+*   **libcairo2-dev** (or equivalent): Development files for Cairo.
+*   **libfreetype6-dev** (or equivalent): Development files for FreeType.
+*   **libfontconfig1-dev** (or equivalent): Development files for Fontconfig.
+*   **grim:** Screenshot utility for Wayland.
+*   **dbus-x11** (or equivalent): D-Bus utilities.
+*   **cargo:** Rust's package manager (also installed via rustup).
+
+The `install-dev-deps.sh` script contains the most up-to-date list for supported distributions. If you modify project dependencies, please update `install-dev-deps.sh` accordingly.
+
+On Debian-based systems (like Ubuntu), if you were to install manually (though the script is preferred), the command would be:
+```bash
 sudo apt-get update
-sudo apt-get install -y sway libudev-dev libinput-dev libcairo2-dev libfreetype6-dev libfontconfig1-dev
+# Note: This list is also in install-dev-deps.sh
+sudo apt-get install -y sway libudev-dev libinput-dev libcairo2-dev libfreetype6-dev libfontconfig1-dev grim dbus-x11 cargo
 ```
 
 ## Running Tests
