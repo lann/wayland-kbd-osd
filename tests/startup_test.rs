@@ -143,4 +143,128 @@ mod tests {
 
         println!("[TEST] Test logic complete. Review output above for application behavior.");
     }
+
+    #[test]
+    fn test_startup_overlay_mode_no_crash() {
+        println!("[TEST_OVERLAY] Starting Sway with verbose logging...");
+        let mut sway_process = Command::new("sway")
+            .arg("--config")
+            .arg("/dev/null") // Use default configuration
+            .arg("--verbose") // Enable verbose logging to capture WAYLAND_DISPLAY
+            .env_remove("WAYLAND_DISPLAY") // Unset WAYLAND_DISPLAY for headless mode
+            .env("WLR_BACKENDS", "headless") // Use headless backend
+            .env("XWAYLAND", "0") // Disable Xwayland
+            .stdout(Stdio::piped()) // Capture stdout
+            .stderr(Stdio::piped()) // Capture stderr to parse for WAYLAND_DISPLAY
+            .spawn()
+            .expect("Failed to start sway headless server. Make sure sway is installed and in PATH.");
+
+        let sway_stderr_arc = Arc::new(Mutex::new(String::new()));
+        let sway_stderr_clone = sway_stderr_arc.clone();
+
+        let stderr_reader = BufReader::new(sway_process.stderr.take().expect("Failed to get sway stderr"));
+
+        let stderr_thread = thread::spawn(move || {
+            for line_result in stderr_reader.lines() {
+                if let Ok(line) = line_result {
+                    println!("[SWAY_OVERLAY STDERR] {}", line); // Print sway's stderr for debugging
+                    let mut stderr_lock = sway_stderr_clone.lock().unwrap();
+                    stderr_lock.push_str(&line);
+                    stderr_lock.push('\n');
+                }
+            }
+        });
+
+        // Also consume stdout to prevent blocking
+        let stdout_reader = BufReader::new(sway_process.stdout.take().expect("Failed to get sway stdout"));
+        let stdout_thread = thread::spawn(move || {
+            for line_result in stdout_reader.lines() {
+                if let Ok(line) = line_result {
+                     println!("[SWAY_OVERLAY STDOUT] {}", line);
+                }
+            }
+        });
+
+
+        println!("[TEST_OVERLAY] Waiting for Sway to initialize and output WAYLAND_DISPLAY (max 10s)...");
+        let wayland_display_name = Arc::new(Mutex::new(None::<String>));
+        let wayland_display_name_clone = wayland_display_name.clone();
+
+        for _ in 0..20 { // Check every 0.5s for 10s
+            thread::sleep(Duration::from_millis(500));
+            if let Ok(Some(status)) = sway_process.try_wait() {
+                // Sway exited, join threads to get full output
+                stderr_thread.join().expect("Sway stderr thread panicked");
+                stdout_thread.join().expect("Sway stdout thread panicked");
+                let final_stderr = sway_stderr_arc.lock().unwrap();
+                panic!("[TEST_OVERLAY] Sway exited prematurely with status: {}. Sway stderr:\n{}", status, *final_stderr);
+            }
+
+            let stderr_lock = sway_stderr_arc.lock().unwrap();
+            if let Some(display_name) = get_wayland_display_from_sway(&stderr_lock) {
+                let mut wdn_lock = wayland_display_name_clone.lock().unwrap();
+                *wdn_lock = Some(display_name.clone());
+                println!("[TEST_OVERLAY] Found WAYLAND_DISPLAY: {}", display_name);
+                break;
+            }
+        }
+
+        let display_name_guard = wayland_display_name.lock().unwrap();
+        let wayland_display_name_str = display_name_guard.as_ref()
+            .expect("[TEST_OVERLAY] Failed to find WAYLAND_DISPLAY in sway output after 10s.");
+
+        println!("[TEST_OVERLAY] Sway appears to be running with WAYLAND_DISPLAY={}", wayland_display_name_str);
+
+        println!("[TEST_OVERLAY] Starting application with --overlay and WAYLAND_DISPLAY={}", wayland_display_name_str);
+        let mut app_process = Command::new("cargo")
+            .arg("run")
+            .arg("--") // Separator for cargo run to pass arguments to the binary
+            .arg("--overlay") // Add the overlay flag
+            .env("WAYLAND_DISPLAY", wayland_display_name_str) // Use the extracted string
+            .stdout(Stdio::inherit()) // Inherit App's stdout
+            .stderr(Stdio::inherit()) // Inherit App's stderr
+            .spawn()
+            .expect("Failed to start the application in overlay mode.");
+
+        println!("[TEST_OVERLAY] Application process started. Sleeping for 3 seconds to let it run...");
+        thread::sleep(Duration::from_secs(3));
+
+        println!("[TEST_OVERLAY] Checking if application exited prematurely...");
+        if let Ok(Some(status)) = app_process.try_wait() {
+            println!("[TEST_OVERLAY] Application exited prematurely with status: {}", status);
+            sway_process.kill().ok();
+            panic!("[TEST_OVERLAY] Application exited prematurely with status: {}", status);
+        }
+
+        println!("[TEST_OVERLAY] Application appears to be running. Killing application process...");
+        if app_process.kill().is_err() {
+            println!("[TEST_OVERLAY] Failed to send kill signal to application (it might have already exited).");
+             match app_process.wait() {
+                Ok(status) => {
+                     println!("[TEST_OVERLAY] Application (after failed kill attempt) exited with status: {}", status);
+                     if !status.success() {
+                        sway_process.kill().ok();
+                        panic!("[TEST_OVERLAY] Application exited with error status {} after failed kill attempt.", status);
+                     }
+                }
+                Err(e) => {
+                    sway_process.kill().ok();
+                    panic!("[TEST_OVERLAY] Failed to wait for app after kill attempt failed: {}", e);
+                }
+            }
+        } else {
+            println!("[TEST_OVERLAY] Kill signal sent to application. Waiting for it to exit...");
+            match app_process.wait() {
+                Ok(status) => println!("[TEST_OVERLAY] Application exited after kill with status: {}", status),
+                Err(e) => {
+                    println!("[TEST_OVERLAY] Error waiting for application process after kill: {}. Proceeding to kill Sway.", e);
+                }
+            }
+        }
+
+        println!("[TEST_OVERLAY] Killing Sway process...");
+        sway_process.kill().ok();
+
+        println!("[TEST_OVERLAY] Test logic complete. Review output above for application behavior.");
+    }
 }

@@ -5,8 +5,9 @@ edition = "2021"
 
 [dependencies]
 log = { version = "0.4.27", features = ["std"] }
-wayland-client = { version = "0.31.10", features = ["log"] }
-wayland-protocols = { version = "0.31.2", features = ["client", "unstable"] }
+wayland-client = { version = "0.30", features = ["log"] }
+wayland-protocols = { version = "0.30", features = ["client", "unstable"] }
+wayland-protocols-wlr = { version = "0.1.0", features = ["client"] } # For wlr-layer-shell
 tempfile = "3.10.1"
 memmap2 = "0.9.4"
 env_logger = "0.11.3"
