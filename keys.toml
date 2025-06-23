@@ -426,7 +426,7 @@ keycode = "apostrophe"
 name = "Enter"
 left = 697.5
 top = 165.0
-width = 112.5
+width = 117.5
 height = 50.0
 keycode = "enter"
 
@@ -522,7 +522,7 @@ keycode = "slash"
 name = "Shift"
 left = 667.5
 top = 220.0
-width = 137.5
+width = 147.5
 height = 50.0
 keycode = "rightshift"
 
@@ -586,7 +586,7 @@ keycode = "menu"
 name = "Ctrl"
 left = 722.5
 top = 275.0
-width = 62.5
+width = 92.5
 height = 50.0
 keycode = "rightctrl"
 
