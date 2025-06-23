@@ -117,28 +117,95 @@ fn draw_single_key_cairo(
     ctx.stroke().expect("Cairo stroke failed");
 
     // Text drawing
-    // Font face and size should be set on the context before this function is called.
-    // Example: ctx.set_font_face(cairo_font_face); ctx.set_font_size(key.text_size as f64);
     let (r, g, b, a) = key.text_color;
     ctx.set_source_rgba(r, g, b, a);
 
-    let text_extents = ctx.text_extents(&key.text).expect("Failed to get text extents");
+    // --- Text Scaling and Truncation Logic ---
+    let mut current_text = key.text.clone();
+    let mut current_font_size = key.text_size as f64;
+    ctx.set_font_size(current_font_size); // Initial font size
+
+    // Define text area constraints
+    let text_padding = (key.width * 0.1).min(key.height * 0.1).max(2.0) as f64; // 10% padding, min 2px
+    let max_text_width = width - 2.0 * text_padding;
+    // let max_text_height = height - 2.0 * text_padding; // Max height can also be a constraint
+
+    let original_font_size = key.text_size as f64;
+    let min_font_size = (original_font_size * 0.5).max(6.0); // Min 50% of original, or 6.0 points
+
+    let mut text_extents = ctx.text_extents(&current_text).expect("Failed to get text extents (initial)");
+
+    // 1. Font size scaling
+    while text_extents.width() > max_text_width && current_font_size > min_font_size {
+        current_font_size *= 0.9; // Reduce font size by 10%
+        if current_font_size < min_font_size {
+            current_font_size = min_font_size;
+        }
+        ctx.set_font_size(current_font_size);
+        text_extents = ctx.text_extents(&current_text).expect("Failed to get text extents (scaling)");
+        if current_font_size == min_font_size && text_extents.width() > max_text_width {
+            break; // Reached min font size, proceed to truncation if still too wide
+        }
+    }
+
+    // 2. Text truncation
+    if text_extents.width() > max_text_width {
+        let ellipsis = "...";
+        let ellipsis_extents = ctx.text_extents(ellipsis).expect("Failed to get ellipsis extents");
+        let max_width_for_text_with_ellipsis = max_text_width - ellipsis_extents.width();
+
+        while text_extents.width() > max_text_width && !current_text.is_empty() {
+            if current_text.pop().is_none() { // Remove last char
+                break; // Should not happen if !current_text.is_empty()
+            }
+            let temp_text_with_ellipsis = if current_text.is_empty() {
+                // If all text removed, maybe just show ellipsis if it fits, or nothing
+                if ellipsis_extents.width() <= max_text_width { ellipsis.to_string() } else { "".to_string() }
+            } else {
+                format!("{}{}", current_text, ellipsis)
+            };
+
+            text_extents = ctx.text_extents(&temp_text_with_ellipsis).expect("Failed to get text extents (truncating)");
+
+            // Check if the current_text part (before adding ellipsis) is too long
+            let current_text_only_extents = ctx.text_extents(&current_text).expect("Failed to get current_text extents");
+
+            if current_text_only_extents.width() <= max_width_for_text_with_ellipsis || current_text.is_empty() {
+                 current_text = temp_text_with_ellipsis;
+                 text_extents = ctx.text_extents(&current_text).expect("Failed to get final truncated text extents");
+                 break;
+            }
+        }
+         // Final check, if even ellipsis doesn't fit, make text empty or just one/two chars of ellipsis
+        if text_extents.width() > max_text_width {
+            if ellipsis_extents.width() <= max_text_width {
+                current_text = ellipsis.to_string();
+                if current_text.len() > 1 && ctx.text_extents("..").unwrap().width() <= max_text_width {
+                    current_text = "..".to_string();
+                } else if current_text.len() > 0 && ctx.text_extents(".").unwrap().width() <= max_text_width {
+                     current_text = ".".to_string();
+                } else {
+                    current_text = "".to_string(); // Nothing fits
+                }
+            } else {
+                 current_text = "".to_string(); // Ellipsis itself is too wide
+            }
+            // text_extents = ctx.text_extents(&current_text).expect("Failed to get text extents (final truncation check)"); // This was redundant
+        }
+    }
+    // --- End of Text Scaling and Truncation ---
+
+    // Recalculate text_extents with final text and font size
+    // ctx.set_font_size(current_font_size); // Already set during scaling/truncation
+    let text_extents = ctx.text_extents(&current_text).expect("Failed to get text extents (final)");
+
 
     // Calculate text position to center it
-    // text_extents.x_bearing is the horizontal displacement from the origin to the leftmost part of the glyphs.
-    // text_extents.width is the width of the inked area.
-    // text_extents.y_bearing is the vertical displacement from the origin to the topmost part of the glyphs.
-    // text_extents.height is the height of the inked area.
-    // For horizontal centering:
     let text_x = (width - text_extents.width()) / 2.0 - text_extents.x_bearing();
-    // For vertical centering (approximate, depends on font metrics):
-    // Ascent is roughly -text_extents.y_bearing()
-    // Descent is roughly text_extents.height() + text_extents.y_bearing()
-    // Centering the middle of the inked height:
     let text_y = (height - text_extents.height()) / 2.0 - text_extents.y_bearing();
 
     ctx.move_to(text_x, text_y);
-    ctx.show_text(&key.text).expect("Cairo show_text failed");
+    ctx.show_text(&current_text).expect("Cairo show_text failed");
 
     ctx.restore().expect("Failed to restore cairo context state");
 }
