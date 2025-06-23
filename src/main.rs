@@ -226,7 +226,7 @@ fn draw_single_key_cairo(
     ctx.restore().expect("Failed to restore cairo context state");
 }
 
-use std::os::unix::io::{AsRawFd, BorrowedFd, OwnedFd};
+use std::os::unix::io::{AsRawFd, OwnedFd};
 use std::os::unix::fs::OpenOptionsExt;
 use std::fs::OpenOptions;
 use std::path::Path;
@@ -402,7 +402,7 @@ impl AppState {
         let shm_temp_file_fd = self.temp_file.as_ref().unwrap().as_raw_fd();
 
         // Create a new pool and buffer for each draw. This is typical.
-        let pool = unsafe { shm.create_pool(BorrowedFd::borrow_raw(shm_temp_file_fd), size as i32, qh, ()) };
+        let pool = shm.create_pool(shm_temp_file_fd, size as i32, qh, ());
         let buffer = pool.create_buffer(0, width, height, stride, wl_shm::Format::Argb8888, qh, ());
         pool.destroy(); // Pool can be destroyed after buffer creation
 
@@ -699,7 +699,7 @@ impl Dispatch<zwlr_layer_shell_v1::ZwlrLayerShellV1, ()> for AppState {
 }
 
 /// Command-line arguments
-use wayland_protocols::wlr::layer_shell::unstable::v1::client::{zwlr_layer_shell_v1, zwlr_layer_surface_v1};
+use wayland_protocols_wlr::layer_shell::v1::client::{zwlr_layer_shell_v1, zwlr_layer_surface_v1};
 
 #[derive(Parser, Debug)]
 #[clap(author, version, about, long_about = None)]
@@ -1187,9 +1187,9 @@ fn main() {
     log::info!("Entering main event loop.");
 
     let wayland_raw_fd: RawFd = match conn.prepare_read() {
-        Some(guard) => guard.connection_fd().as_raw_fd(),
-        None => {
-            log::error!("Wayland connection is dead before starting event loop.");
+        Ok(guard) => guard.connection_fd().as_raw_fd(),
+        Err(e) => {
+            log::error!("Failed to prepare_read Wayland connection before starting event loop: {}", e);
             process::exit(1);
         }
     };
@@ -1295,32 +1295,35 @@ fn handle_wayland_events(
     event_queue: &mut wayland_client::EventQueue<AppState>,
     app_state: &mut AppState,
 ) -> Result<(), ()> {
-    if let Some(guard) = conn.prepare_read() {
-        match guard.read() {
-            Ok(bytes_read) => {
-                log::trace!("Successfully read {} bytes from Wayland socket", bytes_read);
-                match event_queue.dispatch_pending(app_state) {
-                    Ok(_) => {}
-                    Err(e) => {
-                        log::error!("Error dispatching Wayland events: {}", e);
-                        app_state.running = false;
-                        return Err(());
+    match conn.prepare_read() { // Changed from if let Some(guard)
+        Ok(guard) => { // Handle Ok case
+            match guard.read() {
+                Ok(bytes_read) => {
+                    log::trace!("Successfully read {} bytes from Wayland socket", bytes_read);
+                    match event_queue.dispatch_pending(app_state) {
+                        Ok(_) => {}
+                        Err(e) => {
+                            log::error!("Error dispatching Wayland events: {}", e);
+                            app_state.running = false;
+                            return Err(());
+                        }
                     }
                 }
-            }
-            Err(WaylandError::Io(io_err)) if io_err.kind() == std::io::ErrorKind::WouldBlock => {
-                // No new events, this is normal.
-            }
-            Err(e) => {
-                log::error!("Error reading from Wayland connection: {}", e);
-                app_state.running = false;
-                return Err(());
+                Err(WaylandError::Io(io_err)) if io_err.kind() == std::io::ErrorKind::WouldBlock => {
+                    // No new events, this is normal.
+                }
+                Err(e) => {
+                    log::error!("Error reading from Wayland connection: {}", e);
+                    app_state.running = false;
+                    return Err(());
+                }
             }
         }
-    } else {
-        log::error!("Wayland connection read guard acquisition failed.");
-        app_state.running = false;
-        return Err(());
+        Err(e) => { // Handle Err case from prepare_read
+            log::error!("Failed to prepare_read Wayland connection in event handler: {}", e);
+            app_state.running = false;
+            return Err(());
+        }
     }
     Ok(())
 }
