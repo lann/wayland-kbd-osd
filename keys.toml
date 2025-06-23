@@ -205,7 +205,7 @@ height = 50
 # Top Alpha Row (QWERTY)
 [[key]]
 name = "Tab"
-x = 0
+x = 40 # Adjusted from 0
 y = 110
 width = 80 # Wider
 height = 50
@@ -308,7 +308,7 @@ keycode = "backslash"
 # Middle Alpha Row (ASDF)
 [[key]]
 name = "Caps Lock"
-x = 0
+x = 47 # Adjusted from 0 (47.5 -> 47)
 y = 165
 width = 95 # Wider
 height = 50
@@ -395,7 +395,7 @@ keycode = "apostrophe"
 
 [[key]]
 name = "Enter"
-x = 705
+x = 735 # Adjusted from 705
 y = 165
 width = 110 # Wider
 height = 50
@@ -403,8 +403,8 @@ height = 50
 
 # Bottom Alpha Row (ZXCV)
 [[key]]
-name = "L. Shift"
-x = 0
+name = "Shift" # Was "L. Shift"
+x = 60 # Adjusted from 0
 y = 220
 width = 120 # Wider
 height = 50
@@ -484,8 +484,8 @@ height = 50
 keycode = "slash"
 
 [[key]]
-name = "R. Shift"
-x = 675
+name = "Shift" # Was "R. Shift"
+x = 720 # Adjusted from 675
 y = 220
 width = 140 # Wider
 height = 50
@@ -493,24 +493,24 @@ keycode = "rightshift"
 
 # Bottom Row (Modifiers & Space)
 [[key]]
-name = "L. Ctrl"
-x = 0
+name = "Ctrl" # Was "L. Ctrl"
+x = 35 # Adjusted from 0
 y = 275
 width = 70
 height = 50
 keycode = "leftctrl"
 
 [[key]]
-name = "L. Super" # Or L. Win
-x = 75
+name = "Super" # Was "L. Super"
+x = 105 # Adjusted from 75
 y = 275
 width = 60
 height = 50
 keycode = "leftmeta"
 
 [[key]]
-name = "L. Alt"
-x = 140
+name = "Alt" # Was "L. Alt"
+x = 175 # Adjusted from 140
 y = 275
 width = 70
 height = 50
@@ -518,23 +518,23 @@ keycode = "leftalt"
 
 [[key]]
 name = "Space"
-x = 215
+x = 365 # Adjusted from 215
 y = 275
 width = 300 # Much Wider
 height = 50
 # keycode = "space"
 
 [[key]]
-name = "R. Alt" # Or AltGr
-x = 520
+name = "Alt" # Was "R. Alt"
+x = 555 # Adjusted from 520
 y = 275
 width = 70
 height = 50
 keycode = "rightalt"
 
 [[key]]
-name = "R. Super" # Or R. Win
-x = 595
+name = "Super" # Was "R. Super"
+x = 625 # Adjusted from 595
 y = 275
 width = 60
 height = 50
@@ -542,15 +542,15 @@ keycode = "rightmeta"
 
 [[key]]
 name = "Menu"
-x = 660
+x = 690 # Adjusted from 660
 y = 275
 width = 60
 height = 50
 # keycode = "menu"
 
 [[key]]
-name = "R. Ctrl"
-x = 725
+name = "Ctrl" # Was "R. Ctrl"
+x = 770 # Adjusted from 725
 y = 275
 width = 90
 height = 50
@@ -567,7 +567,7 @@ height = 50
 keycode = "sysrq" # Often maps to SYSRQ
 
 [[key]]
-name = "ScrollLk" # Scroll Lock
+name = "Scroll Lock" # Was "ScrollLk"
 x = 895
 y = 0
 width = 50
