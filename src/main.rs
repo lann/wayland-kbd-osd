@@ -10,15 +10,15 @@ use serde_value::Value as SerdeValue; // For flexible keycode parsing
 use std::fs; // For file reading
 use std::process; // For exiting gracefully on config error
 use clap::Parser; // For command-line argument parsing
+use wayland_client::backend::WaylandError; // Added for handle_wayland_events
+use input::event::Event as LibinputEvent; // Added for handle_libinput_events
+use input::event::keyboard::{KeyboardEvent, KeyState, KeyboardEventTrait}; // Added for handle_libinput_events
 
 mod keycodes; // Our new module
 
 // Graphics and Font rendering
-// use raqote::{SolidSource, PathBuilder, DrawOptions, StrokeStyle, Transform, Source}; // Replaced by cairo
-// use rusttype::{Font, Scale, point, PositionedGlyph, OutlineBuilder}; // Replaced by cairo
-use cairo::{Context, ImageSurface, Format, FontFace as CairoFontFace}; // Added for cairo-rs (Removed FtFontFace, FontSlant, FontWeight, Surface)
-use freetype::{Library as FreeTypeLibrary}; // Added for freetype-rs, removed unused FreeTypeLoadFlag
-// use euclid::Angle; // No longer needed
+use cairo::{Context, ImageSurface, Format, FontFace as CairoFontFace};
+use freetype::{Library as FreeTypeLibrary};
 
 // Configuration Structs
 #[derive(Deserialize, Debug, Clone)]
@@ -74,8 +74,6 @@ struct KeyDisplay {
 //     font: &Font<'_>
 // ) {
     // ... old raqote implementation ...
-// }
-
 // New function using Cairo
 fn draw_single_key_cairo(
     ctx: &Context,
@@ -122,82 +120,99 @@ fn draw_single_key_cairo(
     ctx.set_source_rgba(r, g, b, a);
 
     // --- Text Scaling and Truncation Logic ---
+    // This section attempts to fit the key's text within its bounds.
+    // It involves two main strategies:
+    // 1. Font Size Scaling: Reduce font size iteratively until text fits or min font size is reached.
+    // 2. Text Truncation: If scaling isn't enough, remove characters from the end and append "..."
+
     let mut current_text = key.text.clone();
     let mut current_font_size = key.text_size as f64;
-    ctx.set_font_size(current_font_size); // Initial font size
+    ctx.set_font_size(current_font_size); // Set initial font size
 
-    // Define text area constraints
-    let text_padding = (key.width * 0.1).min(key.height * 0.1).max(2.0) as f64; // 10% padding, min 2px
-    let max_text_width = width - 2.0 * text_padding;
-    // let max_text_height = height - 2.0 * text_padding; // Max height can also be a constraint
+    // Define text area constraints based on key dimensions and padding.
+    // Padding is a small percentage of the key's width/height, with a minimum pixel value.
+    let text_padding = (key.width * 0.1).min(key.height * 0.1).max(2.0) as f64;
+    let max_text_width = width - 2.0 * text_padding; // Available width for text inside padding
+    // let max_text_height = height - 2.0 * text_padding; // Max height could also be a constraint if needed
 
     let original_font_size = key.text_size as f64;
-    let min_font_size = (original_font_size * 0.5).max(6.0); // Min 50% of original, or 6.0 points
+    // Define a minimum sensible font size: 50% of original, but not less than 6.0 points.
+    let min_font_size = (original_font_size * 0.5).max(6.0);
 
     let mut text_extents = ctx.text_extents(&current_text).expect("Failed to get text extents (initial)");
 
-    // 1. Font size scaling
+    // --- Stage 1: Font Size Scaling ---
+    // Iteratively reduce font size if the current text width exceeds the maximum allowed width.
+    // Stop if text fits, or if the font size reaches the defined minimum.
     while text_extents.width() > max_text_width && current_font_size > min_font_size {
         current_font_size *= 0.9; // Reduce font size by 10%
         if current_font_size < min_font_size {
-            current_font_size = min_font_size;
+            current_font_size = min_font_size; // Clamp to minimum font size
         }
-        ctx.set_font_size(current_font_size);
+        ctx.set_font_size(current_font_size); // Apply new font size to context
         text_extents = ctx.text_extents(&current_text).expect("Failed to get text extents (scaling)");
+
+        // If even at minimum font size the text is too wide, break and proceed to truncation.
         if current_font_size == min_font_size && text_extents.width() > max_text_width {
-            break; // Reached min font size, proceed to truncation if still too wide
+            break;
         }
     }
 
-    // 2. Text truncation
+    // --- Stage 2: Text Truncation ---
+    // If, after font scaling, the text is still too wide, truncate it.
     if text_extents.width() > max_text_width {
         let ellipsis = "...";
         let ellipsis_extents = ctx.text_extents(ellipsis).expect("Failed to get ellipsis extents");
+        // Calculate the maximum width available for the text part when an ellipsis is present.
         let max_width_for_text_with_ellipsis = max_text_width - ellipsis_extents.width();
 
+        // Iteratively remove characters from the end of `current_text`.
         while text_extents.width() > max_text_width && !current_text.is_empty() {
-            if current_text.pop().is_none() { // Remove last char
-                break; // Should not happen if !current_text.is_empty()
+            if current_text.pop().is_none() { // Remove the last character
+                break; // Should not happen due to !current_text.is_empty() check, but good for safety.
             }
+
+            // Form a temporary string with the current (shortened) text plus ellipsis.
             let temp_text_with_ellipsis = if current_text.is_empty() {
-                // If all text removed, maybe just show ellipsis if it fits, or nothing
+                // If all original text is removed, show ellipsis if it fits, otherwise empty string.
                 if ellipsis_extents.width() <= max_text_width { ellipsis.to_string() } else { "".to_string() }
             } else {
                 format!("{}{}", current_text, ellipsis)
             };
 
+            // Measure the new temporary string.
             text_extents = ctx.text_extents(&temp_text_with_ellipsis).expect("Failed to get text extents (truncating)");
 
-            // Check if the current_text part (before adding ellipsis) is too long
+            // Check if the actual text part (without ellipsis) now fits within its allocated space.
             let current_text_only_extents = ctx.text_extents(&current_text).expect("Failed to get current_text extents");
-
             if current_text_only_extents.width() <= max_width_for_text_with_ellipsis || current_text.is_empty() {
-                 current_text = temp_text_with_ellipsis;
+                 current_text = temp_text_with_ellipsis; // Adopt the text with ellipsis
                  text_extents = ctx.text_extents(&current_text).expect("Failed to get final truncated text extents");
-                 break;
+                 break; // Text with ellipsis fits, or text is empty.
             }
         }
-         // Final check, if even ellipsis doesn't fit, make text empty or just one/two chars of ellipsis
+
+        // --- Stage 2b: Final Ellipsis Fit Check ---
+        // After truncation loop, if `current_text` (which might include "...") is still too wide,
+        // it means even the shortest version of `text...` didn't fit.
+        // Try to fit just the ellipsis, then shorter versions ("..", "."), then empty string.
         if text_extents.width() > max_text_width {
-            if ellipsis_extents.width() <= max_text_width {
+            if ellipsis_extents.width() <= max_text_width { // Can full "..." fit?
                 current_text = ellipsis.to_string();
-                if current_text.len() > 1 && ctx.text_extents("..").unwrap().width() <= max_text_width {
-                    current_text = "..".to_string();
-                } else if current_text.len() > 0 && ctx.text_extents(".").unwrap().width() <= max_text_width {
-                     current_text = ".".to_string();
-                } else {
-                    current_text = "".to_string(); // Nothing fits
-                }
-            } else {
-                 current_text = "".to_string(); // Ellipsis itself is too wide
+            } else if ctx.text_extents("..").unwrap().width() <= max_text_width { // Can ".." fit?
+                current_text = "..".to_string();
+            } else if ctx.text_extents(".").unwrap().width() <= max_text_width { // Can "." fit?
+                current_text = ".".to_string();
+            } else { // Nothing fits.
+                current_text = "".to_string();
             }
-            // text_extents = ctx.text_extents(&current_text).expect("Failed to get text extents (final truncation check)"); // This was redundant
+            // text_extents = ctx.text_extents(&current_text).expect("Failed to get text extents (final truncation check)"); // Recalculate if needed, but current_text is final.
         }
     }
     // --- End of Text Scaling and Truncation ---
 
-    // Recalculate text_extents with final text and font size
-    // ctx.set_font_size(current_font_size); // Already set during scaling/truncation
+    // Recalculate text_extents with the final potentially scaled/truncated text and font size.
+    // ctx.set_font_size(current_font_size); // Font size is already set correctly from scaling/truncation phase.
     let text_extents = ctx.text_extents(&current_text).expect("Failed to get text extents (final)");
 
 
@@ -329,18 +344,18 @@ impl AppState {
             self.mmap = None; // Drop the old mmap before the file is potentially truncated/resized
             self.temp_file = None; // Drop the old file
 
-            let temp_f = tempfile::tempfile().expect("Failed to create temp file");
-            temp_f.set_len(size as u64).expect("Failed to set temp file length");
-            self.mmap = Some(unsafe { MmapMut::map_mut(&temp_f).expect("Failed to map temp file") });
-            self.temp_file = Some(temp_f);
+            let shm_temp_file = tempfile::tempfile().expect("Failed to create temp file for SHM");
+            shm_temp_file.set_len(size as u64).expect("Failed to set SHM temp file length");
+            self.mmap = Some(unsafe { MmapMut::map_mut(&shm_temp_file).expect("Failed to map SHM temp file") });
+            self.temp_file = Some(shm_temp_file);
         }
 
         // self.mmap is guaranteed to be Some by the logic above.
         // let mmap = self.mmap.as_mut().unwrap(); // This variable was unused, mmap_data below is used.
-        let temp_file_fd = self.temp_file.as_ref().unwrap().as_raw_fd();
+        let shm_temp_file_fd = self.temp_file.as_ref().unwrap().as_raw_fd();
 
         // Create a new pool and buffer for each draw. This is typical.
-        let pool = unsafe { shm.create_pool(BorrowedFd::borrow_raw(temp_file_fd), size as i32, qh, ()) };
+        let pool = unsafe { shm.create_pool(BorrowedFd::borrow_raw(shm_temp_file_fd), size as i32, qh, ()) };
         let buffer = pool.create_buffer(0, width, height, stride, wl_shm::Format::Argb8888, qh, ());
         pool.destroy(); // Pool can be destroyed after buffer creation
 
@@ -450,11 +465,11 @@ impl AppState {
         let cairo_font_face = CairoFontFace::create_from_ft(&ft_face)
             .expect("Failed to create Cairo font face from FT face");
 
-        // Default appearance values (unscaled)
-        // const DEFAULT_CORNER_RADIUS_UNSCALED: f32 = 8.0; // Now a global const
-        const DEFAULT_BORDER_THICKNESS_UNSCALED: f32 = 2.0;
-        const DEFAULT_ROTATION_DEGREES: f32 = 0.0; // Rotation is not scaled
-        // const DEFAULT_TEXT_SIZE_UNSCALED: f32 = 18.0; // Now a global const
+        // Default appearance values are now global consts.
+        // DEFAULT_CORNER_RADIUS_UNSCALED
+        // DEFAULT_BORDER_THICKNESS_UNSCALED
+        // DEFAULT_ROTATION_DEGREES
+        // DEFAULT_TEXT_SIZE_UNSCALED
 
         // Default colors for Cairo: (R, G, B, A) with values from 0.0 to 1.0
         let border_c_cairo = (0x80 as f64 / 255.0, 0x80 as f64 / 255.0, 0x80 as f64 / 255.0, 0xFF as f64 / 255.0);
@@ -532,23 +547,11 @@ impl AppState {
     }
 }
 
-// Default appearance values (unscaled) - also used in check_config
+// Default appearance values (unscaled) - also used in check_config and AppState::draw
 const DEFAULT_CORNER_RADIUS_UNSCALED: f32 = 8.0;
-// const DEFAULT_BORDER_THICKNESS_UNSCALED: f32 = 2.0; // Defined in draw()
+const DEFAULT_BORDER_THICKNESS_UNSCALED: f32 = 2.0;
 const DEFAULT_TEXT_SIZE_UNSCALED: f32 = 18.0;
-// const DEFAULT_ROTATION_DEGREES: f32 = 0.0; // Defined in draw()
-
-
-// struct PathBuilderSink<'a>(&'a mut raqote::PathBuilder); // Removed, was for raqote/rusttype
-
-// impl<'a> OutlineBuilder for PathBuilderSink<'a> { // Removed
-//     fn move_to(&mut self, x: f32, y: f32) { self.0.move_to(x, y); }
-//     fn line_to(&mut self, x: f32, y: f32) { self.0.line_to(x, y); }
-//     fn quad_to(&mut self, x1: f32, y1: f32, x: f32, y: f32) { self.0.quad_to(x1, y1, x, y); }
-//     fn curve_to(&mut self, x1: f32, y1: f32, x2: f32, y2: f32, x: f32, y: f32) { self.0.cubic_to(x1, y1, x2, y2, x, y); }
-//     fn close(&mut self) { self.0.close(); }
-// }
-
+const DEFAULT_ROTATION_DEGREES: f32 = 0.0;
 impl Dispatch<xdg_wm_base::XdgWmBase, ()> for AppState {
     fn event( _state: &mut AppState, proxy: &xdg_wm_base::XdgWmBase, event: xdg_wm_base::Event, _data: &(), _conn: &Connection, _qh: &QueueHandle<AppState>) {
         if let xdg_wm_base::Event::Ping { serial } = event { proxy.pong(serial); }
@@ -623,300 +626,6 @@ impl Dispatch<wl_buffer::WlBuffer, ()> for AppState {
         if let wl_buffer::Event::Release = event { log::debug!("Buffer {:?} released", buffer.id()); }
     }
 }
-
-/* PREVIOUS MAIN FUNCTION - COMMENTED OUT
-fn main() {
-    env_logger::init();
-    log::info!("Starting Wayland application...");
-
-    // Load configuration
-    let config_path = "keys.toml";
-    let config_content = fs::read_to_string(config_path)
-        .unwrap_or_else(|e| {
-            eprintln!("Failed to read configuration file '{}': {}", config_path, e);
-            process::exit(1);
-        });
-
-    let mut app_config: AppConfig = toml::from_str(&config_content)
-        .unwrap_or_else(|e| {
-            eprintln!("Failed to parse TOML configuration from '{}': {}", config_path, e);
-            process::exit(1);
-        });
-
-    // Process raw_keycode to populate keycode
-    for key_conf in app_config.key.iter_mut() {
-        let resolved_code = match key_conf.raw_keycode.as_ref() {
-            Some(SerdeValue::String(s)) => {
-                keycodes::get_keycode_from_string(s)
-            }
-            // Handle various integer types that serde_value might produce from TOML
-            Some(SerdeValue::U8(i)) => Ok(*i as u32),
-            Some(SerdeValue::U16(i)) => Ok(*i as u32),
-            Some(SerdeValue::U32(i)) => Ok(*i),
-            Some(SerdeValue::U64(i)) => {
-                if *i <= u32::MAX as u64 {
-                    Ok(*i as u32)
-                } else {
-                    Err(format!("Integer keycode {} for key '{}' is too large for u32.", i, key_conf.name))
-                }
-            }
-            Some(SerdeValue::I8(i)) => {
-                if *i >= 0 { Ok(*i as u32) } else { Err(format!("Negative keycode {} for key '{}' is invalid.", i, key_conf.name)) }
-            }
-            Some(SerdeValue::I16(i)) => {
-                if *i >= 0 { Ok(*i as u32) } else { Err(format!("Negative keycode {} for key '{}' is invalid.", i, key_conf.name)) }
-            }
-            Some(SerdeValue::I32(i)) => {
-                if *i >= 0 { Ok(*i as u32) } else { Err(format!("Negative keycode {} for key '{}' is invalid.", i, key_conf.name)) }
-            }
-            Some(SerdeValue::I64(i)) => {
-                if *i >= 0 && *i <= u32::MAX as i64 {
-                    Ok(*i as u32)
-                } else {
-                    Err(format!("Integer keycode {} for key '{}' is out of valid u32 range.", i, key_conf.name))
-                }
-            }
-            None => { // Default to name field
-                keycodes::get_keycode_from_string(&key_conf.name)
-            }
-            Some(other_type) => {
-                 Err(format!("Invalid type for keycode field for key '{}': expected string or integer, got {:?}", key_conf.name, other_type))
-            }
-        };
-
-        match resolved_code {
-            Ok(code) => key_conf.keycode = code,
-            Err(e) => {
-                // If defaulting from 'name' failed, guide user to set 'keycode'
-                if key_conf.raw_keycode.is_none() {
-                     eprintln!(
-                        "Error processing key '{}': Could not resolve default keycode from name ('{}'). Please specify a 'keycode' field for this key. Details: {}",
-                        key_conf.name, key_conf.name, e
-                    );
-                } else {
-                    eprintln!("Error processing keycode for key '{}': {}", key_conf.name, e);
-                }
-                process::exit(1);
-            }
-        }
-    }
-
-    log::info!("Configuration loaded and processed: {:?}", app_config);
-
-    let conn = Connection::connect_to_env().unwrap();
-    let mut event_queue = conn.new_event_queue();
-    let qh = event_queue.handle();
-    let mut app_state = AppState::new(app_config.clone()); // Pass processed config to AppState
-    let _registry = conn.display().get_registry(&qh, ());
-    event_queue.roundtrip(&mut app_state).unwrap();
-
-    if app_state.compositor.is_none() || app_state.shm.is_none() || app_state.xdg_wm_base.is_none() {
-        panic!("Failed to bind essential Wayland globals.");
-    }
-    log::info!("Essential globals bound.");
-
-    let interface = MyLibinputInterface;
-    let mut libinput_context = input::Libinput::new_with_udev(interface);
-    match libinput_context.udev_assign_seat("seat0") {
-        Ok(_) => {
-            log::info!("Successfully assigned seat0 to libinput context.");
-            app_state.input_context = Some(libinput_context);
-        }
-        Err(e) => {
-            log::error!("Failed to assign seat0 to libinput context: {:?}", e);
-            log::error!("Input monitoring will be disabled. Ensure permissions for /dev/input devices.");
-        }
-    }
-
-    let surface = app_state.compositor.as_ref().unwrap().create_surface(&qh, ());
-    app_state.surface = Some(surface.clone());
-    let xdg_surface = app_state.xdg_wm_base.as_ref().unwrap().get_xdg_surface(&surface, &qh, ());
-    let toplevel = xdg_surface.get_toplevel(&qh, ());
-    toplevel.set_title("Wayland Keyboard OSD".to_string());
-    surface.commit();
-
-    // Dispatch events once to process initial configure and draw the window.
-    log::info!("Initial surface commit done. Dispatching events to catch initial configure...");
-    if event_queue.roundtrip(&mut app_state).is_err() {
-        log::error!("Error during initial roundtrip after surface commit.");
-        // Depending on the error, might want to exit or handle differently
-    }
-    log::info!("Initial roundtrip complete. Wayland window should be configured and drawn. Waiting for further events...");
-
-    use input::event::Event as LibinputEvent;
-    use input::event::keyboard::{KeyboardEvent, KeyState, KeyboardEventTrait};
-    // use std::time::Duration; // No longer needed
-    use wayland_client::backend::WaylandError;
-    use std::os::unix::io::{AsRawFd as _, RawFd};
-    // use std::ptr; // No longer needed if pollfd is zeroed carefully or fully initialized
-    use std::io; // For io::Error
-
-    log::info!("Entering main event loop.");
-
-    let wayland_raw_fd: RawFd = conn.prepare_read().unwrap().connection_fd().as_raw_fd();
-    let mut fds: Vec<libc::pollfd> = Vec::new();
-
-    fds.push(libc::pollfd {
-        fd: wayland_raw_fd,
-        events: libc::POLLIN,
-        revents: 0,
-    });
-    const WAYLAND_FD_IDX: usize = 0;
-
-    let mut libinput_fd_idx_opt: Option<usize> = None;
-    if let Some(ref context) = app_state.input_context {
-        let libinput_raw_fd: RawFd = context.as_raw_fd();
-        fds.push(libc::pollfd {
-            fd: libinput_raw_fd,
-            events: libc::POLLIN,
-            revents: 0,
-        });
-        libinput_fd_idx_opt = Some(fds.len() - 1);
-    }
-
-    // Timeout for poll in milliseconds
-    let poll_timeout_ms = 100;
-
-    while app_state.running {
-        // Reset revents before each poll call
-        for item in fds.iter_mut() {
-            item.revents = 0;
-        }
-        let mut needs_redraw = false; // Initialize needs_redraw at the start of the loop iteration
-
-        let ret = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, poll_timeout_ms) };
-
-        if ret < 0 {
-            let errno = io::Error::last_os_error().raw_os_error().unwrap_or(0);
-            if errno == libc::EINTR {
-                log::trace!("libc::poll interrupted, continuing.");
-                continue;
-            }
-            log::error!("libc::poll error: {}", io::Error::last_os_error());
-            app_state.running = false;
-            break;
-        } else if ret == 0 {
-            // Timeout, no events
-            log::trace!("libc::poll timeout, no events.");
-        } else {
-            // Events are ready
-
-            // Check Wayland FD
-            if (fds[WAYLAND_FD_IDX].revents & libc::POLLIN) != 0 {
-                log::trace!("Wayland FD readable (POLLIN)");
-                if let Some(guard) = conn.prepare_read() {
-                    match guard.read() {
-                        Ok(n) => {
-                            log::trace!("Successfully read {} bytes from Wayland socket (after poll)", n);
-                            // Dispatch pending Wayland events. Non-blocking.
-                            match event_queue.dispatch_pending(&mut app_state) {
-                                Ok(_) => { log::trace!("Wayland events dispatched successfully."); }
-                                Err(e) => {
-                                    log::error!("Error in dispatch_pending: {}", e);
-                                    // Handle Wayland dispatch errors similarly to before
-                                    match e {
-                                        wayland_client::DispatchError::Backend(WaylandError::Io(io_err)) => {
-                                            if io_err.kind() == std::io::ErrorKind::Interrupted {
-                                                log::warn!("Wayland dispatch_pending interrupted (IO), continuing.");
-                                            } else {
-                                                log::error!("Wayland dispatch_pending IO error: {}, exiting.", io_err);
-                                                app_state.running = false;
-                                            }
-                                        }
-                                        wayland_client::DispatchError::Backend(WaylandError::Protocol(protocol_err)) => {
-                                            log::error!("Wayland dispatch_pending protocol error: {}, exiting.", protocol_err);
-                                            app_state.running = false;
-                                        }
-                                        _ => {
-                                            log::error!("Unhandled Wayland dispatch_pending error: {}, exiting.", e);
-                                            app_state.running = false;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        Err(WaylandError::Io(io_err)) if io_err.kind() == std::io::ErrorKind::WouldBlock => {
-                            log::trace!("Wayland read would block, no new events this cycle (after poll).");
-                        }
-                        Err(WaylandError::Io(io_err)) => {
-                            log::error!("Error reading from Wayland connection (after poll): {}", io_err);
-                            app_state.running = false;
-                        }
-                        Err(e) => {
-                            log::error!("Error reading from Wayland connection (non-IO, after poll): {}", e);
-                            app_state.running = false;
-                        }
-                    }
-                } else {
-                    log::warn!("Failed to prepare_read on Wayland connection after poll.");
-                }
-            }
-            if (fds[WAYLAND_FD_IDX].revents & libc::POLLERR) != 0 || (fds[WAYLAND_FD_IDX].revents & libc::POLLHUP) != 0 {
-                 log::error!("Wayland FD error/hangup (POLLERR/POLLHUP). Exiting.");
-                 app_state.running = false;
-            }
-
-
-            // Check libinput FD
-            if let Some(libinput_idx) = libinput_fd_idx_opt {
-                if app_state.running && (fds[libinput_idx].revents & libc::POLLIN) != 0 {
-                    log::trace!("Libinput FD readable (POLLIN)");
-                    if let Some(ref mut context) = app_state.input_context {
-                        if context.dispatch().is_err() {
-                            log::error!("Libinput dispatch error in event processing loop");
-                        }
-                        while let Some(libinput_event) = context.next() {
-                            if let LibinputEvent::Keyboard(KeyboardEvent::Key(key_event)) = libinput_event {
-                                let key_code = key_event.key();
-                                let key_state = key_event.key_state();
-                                log::trace!("Key event: code {}, state {:?}", key_code, key_state);
-
-                                let pressed = key_state == KeyState::Pressed;
-                                if let Some(current_state) = app_state.key_states.get_mut(&key_code) {
-                                    if *current_state != pressed {
-                                        *current_state = pressed;
-                                        needs_redraw = true;
-                                        log::info!("Configured key {} state changed: {}", key_code, pressed);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        if !app_state.running {
-            break;
-        }
-
-        if needs_redraw {
-            if app_state.surface.is_some() && app_state.compositor.is_some() && app_state.shm.is_some() {
-                 app_state.draw(&qh);
-            } else {
-                log::warn!("Skipping draw due to uninitialized Wayland components.");
-            }
-        }
-
-        match conn.flush() {
-            Ok(_) => { log::trace!("Wayland connection flushed successfully."); }
-            Err(WaylandError::Io(e)) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                log::warn!("Wayland flush would block. Messages might be delayed.");
-            }
-            Err(e) => {
-                log::error!("Failed to flush Wayland connection: {}", e);
-                app_state.running = false;
-            }
-        }
-
-        // The main loop using libc::poll doesn't require explicit re-registration of FDs in this manner.
-        // The fds array is re-used in each call to libc::poll.
-    }
-    log::info!("Exiting application loop.");
-}
-*/
-
-
 /// Command-line arguments
 #[derive(Parser, Debug)]
 #[clap(author, version, about, long_about = None)]
@@ -1129,297 +838,6 @@ fn simulate_text_layout(
         final_text: current_text,
     })
 }
-
-
-// fn main() { // Original main function, to be removed or commented out
-//     env_logger::init();
-//     log::info!("Starting Wayland application...");
-//
-//     // Load configuration
-//     let config_path = "keys.toml";
-//     let config_content = fs::read_to_string(config_path)
-//         .unwrap_or_else(|e| {
-//             eprintln!("Failed to read configuration file '{}': {}", config_path, e);
-//             process::exit(1);
-//         });
-//
-//     let mut app_config: AppConfig = toml::from_str(&config_content)
-//         .unwrap_or_else(|e| {
-//             eprintln!("Failed to parse TOML configuration from '{}': {}", config_path, e);
-//             process::exit(1);
-//         });
-//
-//     // Process raw_keycode to populate keycode
-//     for key_conf in app_config.key.iter_mut() {
-//         let resolved_code = match key_conf.raw_keycode.as_ref() {
-//             Some(SerdeValue::String(s)) => {
-//                 keycodes::get_keycode_from_string(s)
-//             }
-//             // Handle various integer types that serde_value might produce from TOML
-//             Some(SerdeValue::U8(i)) => Ok(*i as u32),
-//             Some(SerdeValue::U16(i)) => Ok(*i as u32),
-//             Some(SerdeValue::U32(i)) => Ok(*i),
-//             Some(SerdeValue::U64(i)) => {
-//                 if *i <= u32::MAX as u64 {
-//                     Ok(*i as u32)
-//                 } else {
-//                     Err(format!("Integer keycode {} for key '{}' is too large for u32.", i, key_conf.name))
-//                 }
-//             }
-//             Some(SerdeValue::I8(i)) => {
-//                 if *i >= 0 { Ok(*i as u32) } else { Err(format!("Negative keycode {} for key '{}' is invalid.", i, key_conf.name)) }
-//             }
-//             Some(SerdeValue::I16(i)) => {
-//                 if *i >= 0 { Ok(*i as u32) } else { Err(format!("Negative keycode {} for key '{}' is invalid.", i, key_conf.name)) }
-//             }
-//             Some(SerdeValue::I32(i)) => {
-//                 if *i >= 0 { Ok(*i as u32) } else { Err(format!("Negative keycode {} for key '{}' is invalid.", i, key_conf.name)) }
-//             }
-//             Some(SerdeValue::I64(i)) => {
-//                 if *i >= 0 && *i <= u32::MAX as i64 {
-//                     Ok(*i as u32)
-//                 } else {
-//                     Err(format!("Integer keycode {} for key '{}' is out of valid u32 range.", i, key_conf.name))
-//                 }
-//             }
-//             None => { // Default to name field
-//                 keycodes::get_keycode_from_string(&key_conf.name)
-//             }
-//             Some(other_type) => {
-//                  Err(format!("Invalid type for keycode field for key '{}': expected string or integer, got {:?}", key_conf.name, other_type))
-//             }
-//         };
-//
-//         match resolved_code {
-//             Ok(code) => key_conf.keycode = code,
-//             Err(e) => {
-//                 // If defaulting from 'name' failed, guide user to set 'keycode'
-//                 if key_conf.raw_keycode.is_none() {
-//                      eprintln!(
-//                         "Error processing key '{}': Could not resolve default keycode from name ('{}'). Please specify a 'keycode' field for this key. Details: {}",
-//                         key_conf.name, key_conf.name, e
-//                     );
-//                 } else {
-//                     eprintln!("Error processing keycode for key '{}': {}", key_conf.name, e);
-//                 }
-//                 process::exit(1);
-//             }
-//         }
-//     }
-//
-//     log::info!("Configuration loaded and processed: {:?}", app_config);
-//
-//     let conn = Connection::connect_to_env().unwrap();
-//     let mut event_queue = conn.new_event_queue();
-//     let qh = event_queue.handle();
-//     let mut app_state = AppState::new(app_config.clone()); // Pass processed config to AppState
-//     let _registry = conn.display().get_registry(&qh, ());
-//     event_queue.roundtrip(&mut app_state).unwrap();
-//
-//     if app_state.compositor.is_none() || app_state.shm.is_none() || app_state.xdg_wm_base.is_none() {
-//         panic!("Failed to bind essential Wayland globals.");
-//     }
-//     log::info!("Essential globals bound.");
-//
-//     let interface = MyLibinputInterface;
-//     let mut libinput_context = input::Libinput::new_with_udev(interface);
-//     match libinput_context.udev_assign_seat("seat0") {
-//         Ok(_) => {
-//             log::info!("Successfully assigned seat0 to libinput context.");
-//             app_state.input_context = Some(libinput_context);
-//         }
-//         Err(e) => {
-//             log::error!("Failed to assign seat0 to libinput context: {:?}", e);
-//             log::error!("Input monitoring will be disabled. Ensure permissions for /dev/input devices.");
-//         }
-//     }
-//
-//     let surface = app_state.compositor.as_ref().unwrap().create_surface(&qh, ());
-//     app_state.surface = Some(surface.clone());
-//     let xdg_surface = app_state.xdg_wm_base.as_ref().unwrap().get_xdg_surface(&surface, &qh, ());
-//     let toplevel = xdg_surface.get_toplevel(&qh, ());
-//     toplevel.set_title("Wayland Keyboard OSD".to_string());
-//     surface.commit();
-//
-//     // Dispatch events once to process initial configure and draw the window.
-//     log::info!("Initial surface commit done. Dispatching events to catch initial configure...");
-//     if event_queue.roundtrip(&mut app_state).is_err() {
-//         log::error!("Error during initial roundtrip after surface commit.");
-//         // Depending on the error, might want to exit or handle differently
-//     }
-//     log::info!("Initial roundtrip complete. Wayland window should be configured and drawn. Waiting for further events...");
-//
-//     use input::event::Event as LibinputEvent;
-//     use input::event::keyboard::{KeyboardEvent, KeyState, KeyboardEventTrait};
-//     // use std::time::Duration; // No longer needed
-//     use wayland_client::backend::WaylandError;
-//     use std::os::unix::io::{AsRawFd as _, RawFd};
-//     // use std::ptr; // No longer needed if pollfd is zeroed carefully or fully initialized
-//     use std::io; // For io::Error
-//
-//     log::info!("Entering main event loop.");
-//
-//     let wayland_raw_fd: RawFd = conn.prepare_read().unwrap().connection_fd().as_raw_fd();
-//     let mut fds: Vec<libc::pollfd> = Vec::new();
-//
-//     fds.push(libc::pollfd {
-//         fd: wayland_raw_fd,
-//         events: libc::POLLIN,
-//         revents: 0,
-//     });
-//     const WAYLAND_FD_IDX: usize = 0;
-//
-//     let mut libinput_fd_idx_opt: Option<usize> = None;
-//     if let Some(ref context) = app_state.input_context {
-//         let libinput_raw_fd: RawFd = context.as_raw_fd();
-//         fds.push(libc::pollfd {
-//             fd: libinput_raw_fd,
-//             events: libc::POLLIN,
-//             revents: 0,
-//         });
-//         libinput_fd_idx_opt = Some(fds.len() - 1);
-//     }
-//
-//     // Timeout for poll in milliseconds
-//     let poll_timeout_ms = 100;
-//
-//     while app_state.running {
-//         // Reset revents before each poll call
-//         for item in fds.iter_mut() {
-//             item.revents = 0;
-//         }
-//         let mut needs_redraw = false; // Initialize needs_redraw at the start of the loop iteration
-//
-//         let ret = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, poll_timeout_ms) };
-//
-//         if ret < 0 {
-//             let errno = io::Error::last_os_error().raw_os_error().unwrap_or(0);
-//             if errno == libc::EINTR {
-//                 log::trace!("libc::poll interrupted, continuing.");
-//                 continue;
-//             }
-//             log::error!("libc::poll error: {}", io::Error::last_os_error());
-//             app_state.running = false;
-//             break;
-//         } else if ret == 0 {
-//             // Timeout, no events
-//             log::trace!("libc::poll timeout, no events.");
-//         } else {
-//             // Events are ready
-//
-//             // Check Wayland FD
-//             if (fds[WAYLAND_FD_IDX].revents & libc::POLLIN) != 0 {
-//                 log::trace!("Wayland FD readable (POLLIN)");
-//                 if let Some(guard) = conn.prepare_read() {
-//                     match guard.read() {
-//                         Ok(n) => {
-//                             log::trace!("Successfully read {} bytes from Wayland socket (after poll)", n);
-//                             // Dispatch pending Wayland events. Non-blocking.
-//                             match event_queue.dispatch_pending(&mut app_state) {
-//                                 Ok(_) => { log::trace!("Wayland events dispatched successfully."); }
-//                                 Err(e) => {
-//                                     log::error!("Error in dispatch_pending: {}", e);
-//                                     // Handle Wayland dispatch errors similarly to before
-//                                     match e {
-//                                         wayland_client::DispatchError::Backend(WaylandError::Io(io_err)) => {
-//                                             if io_err.kind() == std::io::ErrorKind::Interrupted {
-//                                                 log::warn!("Wayland dispatch_pending interrupted (IO), continuing.");
-//                                             } else {
-//                                                 log::error!("Wayland dispatch_pending IO error: {}, exiting.", io_err);
-//                                                 app_state.running = false;
-//                                             }
-//                                         }
-//                                         wayland_client::DispatchError::Backend(WaylandError::Protocol(protocol_err)) => {
-//                                             log::error!("Wayland dispatch_pending protocol error: {}, exiting.", protocol_err);
-//                                             app_state.running = false;
-//                                         }
-//                                         _ => {
-//                                             log::error!("Unhandled Wayland dispatch_pending error: {}, exiting.", e);
-//                                             app_state.running = false;
-//                                         }
-//                                     }
-//                                 }
-//                             }
-//                         }
-//                         Err(WaylandError::Io(io_err)) if io_err.kind() == std::io::ErrorKind::WouldBlock => {
-//                             log::trace!("Wayland read would block, no new events this cycle (after poll).");
-//                         }
-//                         Err(WaylandError::Io(io_err)) => {
-//                             log::error!("Error reading from Wayland connection (after poll): {}", io_err);
-//                             app_state.running = false;
-//                         }
-//                         Err(e) => {
-//                             log::error!("Error reading from Wayland connection (non-IO, after poll): {}", e);
-//                             app_state.running = false;
-//                         }
-//                     }
-//                 } else {
-//                     log::warn!("Failed to prepare_read on Wayland connection after poll.");
-//                 }
-//             }
-//             if (fds[WAYLAND_FD_IDX].revents & libc::POLLERR) != 0 || (fds[WAYLAND_FD_IDX].revents & libc::POLLHUP) != 0 {
-//                  log::error!("Wayland FD error/hangup (POLLERR/POLLHUP). Exiting.");
-//                  app_state.running = false;
-//             }
-//
-//
-//             // Check libinput FD
-//             if let Some(libinput_idx) = libinput_fd_idx_opt {
-//                 if app_state.running && (fds[libinput_idx].revents & libc::POLLIN) != 0 {
-//                     log::trace!("Libinput FD readable (POLLIN)");
-//                     if let Some(ref mut context) = app_state.input_context {
-//                         if context.dispatch().is_err() {
-//                             log::error!("Libinput dispatch error in event processing loop");
-//                         }
-//                         while let Some(libinput_event) = context.next() {
-//                             if let LibinputEvent::Keyboard(KeyboardEvent::Key(key_event)) = libinput_event {
-//                                 let key_code = key_event.key();
-//                                 let key_state = key_event.key_state();
-//                                 log::trace!("Key event: code {}, state {:?}", key_code, key_state);
-//
-//                                 let pressed = key_state == KeyState::Pressed;
-//                                 if let Some(current_state) = app_state.key_states.get_mut(&key_code) {
-//                                     if *current_state != pressed {
-//                                         *current_state = pressed;
-//                                         needs_redraw = true;
-//                                         log::info!("Configured key {} state changed: {}", key_code, pressed);
-//                                     }
-//                                 }
-//                             }
-//                         }
-//                     }
-//                 }
-//             }
-//         }
-//
-//         if !app_state.running {
-//             break;
-//         }
-//
-//         if needs_redraw {
-//             if app_state.surface.is_some() && app_state.compositor.is_some() && app_state.shm.is_some() {
-//                  app_state.draw(&qh);
-//             } else {
-//                 log::warn!("Skipping draw due to uninitialized Wayland components.");
-//             }
-//         }
-//
-//         match conn.flush() {
-//             Ok(_) => { log::trace!("Wayland connection flushed successfully."); }
-//             Err(WaylandError::Io(e)) if e.kind() == std::io::ErrorKind::WouldBlock => {
-//                 log::warn!("Wayland flush would block. Messages might be delayed.");
-//             }
-//             Err(e) => {
-//                 log::error!("Failed to flush Wayland connection: {}", e);
-//                 app_state.running = false;
-//             }
-//         }
-//
-//         // The main loop using libc::poll doesn't require explicit re-registration of FDs in this manner.
-//         // The fds array is re-used in each call to libc::poll.
-//     }
-//     log::info!("Exiting application loop.");
-// }
 
 
 // Modified main function (this one should be the active one)
@@ -1644,10 +1062,8 @@ fn main() {
     // However, the xdg_surface configure event should trigger the first draw.
     log::info!("Initial roundtrip complete. Wayland window should be configured. Waiting for events...");
 
-
-    use input::event::Event as LibinputEvent;
-    use input::event::keyboard::{KeyboardEvent, KeyState, KeyboardEventTrait};
-    use wayland_client::backend::WaylandError;
+    // Imports for LibinputEvent, KeyboardEvent, KeyState, KeyboardEventTrait, WaylandError
+    // are now at the top of the module.
     use std::os::unix::io::{AsRawFd as _, RawFd};
     use std::io;
 
@@ -1666,12 +1082,13 @@ fn main() {
     const WAYLAND_FD_IDX: usize = 0;
 
     let mut libinput_fd_idx_opt: Option<usize> = None;
-    if let Some(ref context) = app_state.input_context {
+    if let Some(ref context) = app_state.input_context { // context can be an immutable ref now
         let libinput_raw_fd: RawFd = context.as_raw_fd();
         fds.push(libc::pollfd { fd: libinput_raw_fd, events: libc::POLLIN, revents: 0 });
         libinput_fd_idx_opt = Some(fds.len() - 1);
-        log_if_input_device_access_denied(&app_state.config, context);
+        log_if_input_device_access_denied(&app_state.config, true); // Pass true since context is Some
     } else {
+        log_if_input_device_access_denied(&app_state.config, false); // Pass false since context is None
         log::warn!("No libinput context available. Key press/release events will not be monitored.");
     }
 
@@ -1694,64 +1111,44 @@ fn main() {
         } else {
             // Wayland events
             if (fds[WAYLAND_FD_IDX].revents & libc::POLLIN) != 0 {
-                if let Some(guard) = conn.prepare_read() {
-                    match guard.read() { // Corrected from read_events() to read()
-                        Ok(bytes_read) => { // read() returns number of bytes or an error
-                            log::trace!("Successfully read {} bytes from Wayland socket", bytes_read);
-                             match event_queue.dispatch_pending(&mut app_state) {
-                                Ok(_) => {}
-                                Err(e) => { log::error!("Error dispatching Wayland events: {}", e); app_state.running = false; }
-                            }
-                        }
-                        Err(WaylandError::Io(io_err)) if io_err.kind() == std::io::ErrorKind::WouldBlock => { /* No new events */ }
-                        Err(e) => { log::error!("Error reading from Wayland connection: {}", e); app_state.running = false; }
-                    }
-                } else {
-                     log::error!("Wayland connection read guard acquisition failed after poll.");
-                     app_state.running = false;
+                if handle_wayland_events(&conn, &mut event_queue, &mut app_state).is_err() {
+                    // app_state.running is set to false within handle_wayland_events on error
+                    break;
                 }
             }
             if (fds[WAYLAND_FD_IDX].revents & (libc::POLLERR | libc::POLLHUP)) != 0 {
-                 log::error!("Wayland FD error/hangup (POLLERR/POLLHUP). Exiting.");
-                 app_state.running = false;
+                log::error!("Wayland FD error/hangup (POLLERR/POLLHUP). Exiting.");
+                app_state.running = false;
             }
 
             // Libinput events
             if let Some(libinput_idx) = libinput_fd_idx_opt {
                 if app_state.running && (fds[libinput_idx].revents & libc::POLLIN) != 0 {
-                    if let Some(ref mut context) = app_state.input_context {
-                        if context.dispatch().is_err() { log::error!("Libinput dispatch error"); }
-                        while let Some(event) = context.next() {
-                            if let LibinputEvent::Keyboard(KeyboardEvent::Key(key_event)) = event {
-                                let key_code = key_event.key();
-                                let pressed = key_event.key_state() == KeyState::Pressed;
-                                if let Some(current_state) = app_state.key_states.get_mut(&key_code) {
-                                    if *current_state != pressed {
-                                        *current_state = pressed;
-                                        app_state.needs_redraw = true; // Use AppState's field
-                                        log::debug!("Key {} state changed to: {}", key_code, pressed);
-                                    }
-                                }
-                            }
-                        }
-                    }
+                    handle_libinput_events(&mut app_state);
                 }
-                 if app_state.running && (fds[libinput_idx].revents & (libc::POLLERR | libc::POLLHUP)) != 0 {
+                if app_state.running && (fds[libinput_idx].revents & (libc::POLLERR | libc::POLLHUP)) != 0 {
                     log::error!("Libinput FD error/hangup (POLLERR/POLLHUP). Input monitoring might stop.");
+                    // Attempt to dispatch any remaining events from libinput before removing it
                     if let Some(ref mut context) = app_state.input_context {
-                        let _ = context.dispatch();
+                        let _ = context.dispatch(); // Ignore error here, as we are already in an error state
                     }
-                    app_state.input_context = None;
-                    if fds.len() > libinput_idx {
-                        fds.remove(libinput_idx);
+                    app_state.input_context = None; // Stop using libinput
+
+                    // Remove the libinput FD from the poll list carefully
+                    // Find the actual index of libinput_fd in fds, in case WAYLAND_FD_IDX is not 0 or list changes
+                    if let Some(idx_to_remove) = fds.iter().position(|pollfd| pollfd.fd == fds[libinput_idx].fd) {
+                        fds.remove(idx_to_remove);
                     }
-                    libinput_fd_idx_opt = None;
+                    libinput_fd_idx_opt = None; // Clear the option
+
                     log::warn!("Libinput context removed due to FD error. Key press/release events will no longer be monitored.");
                 }
             }
         }
 
-        if !app_state.running { break; }
+        if !app_state.running {
+            break;
+        }
 
         if app_state.needs_redraw {
             if app_state.surface.is_some() {
@@ -1767,39 +1164,91 @@ fn main() {
         match conn.flush() {
             Ok(_) => {}
             Err(WaylandError::Io(e)) if e.kind() == std::io::ErrorKind::WouldBlock => { /* Fine */ }
-            Err(e) => { log::error!("Failed to flush Wayland connection: {}", e); app_state.running = false; }
+            Err(e) => {
+                log::error!("Failed to flush Wayland connection: {}", e);
+                app_state.running = false;
+            }
         }
     }
     log::info!("Exiting application loop.");
 }
 
+fn handle_wayland_events(
+    conn: &Connection,
+    event_queue: &mut wayland_client::EventQueue<AppState>,
+    app_state: &mut AppState,
+) -> Result<(), ()> {
+    if let Some(guard) = conn.prepare_read() {
+        match guard.read() {
+            Ok(bytes_read) => {
+                log::trace!("Successfully read {} bytes from Wayland socket", bytes_read);
+                match event_queue.dispatch_pending(app_state) {
+                    Ok(_) => {}
+                    Err(e) => {
+                        log::error!("Error dispatching Wayland events: {}", e);
+                        app_state.running = false;
+                        return Err(());
+                    }
+                }
+            }
+            Err(WaylandError::Io(io_err)) if io_err.kind() == std::io::ErrorKind::WouldBlock => {
+                // No new events, this is normal.
+            }
+            Err(e) => {
+                log::error!("Error reading from Wayland connection: {}", e);
+                app_state.running = false;
+                return Err(());
+            }
+        }
+    } else {
+        log::error!("Wayland connection read guard acquisition failed.");
+        app_state.running = false;
+        return Err(());
+    }
+    Ok(())
+}
+
+fn handle_libinput_events(app_state: &mut AppState) {
+    if let Some(ref mut context) = app_state.input_context {
+        if context.dispatch().is_err() {
+            log::error!("Libinput dispatch error");
+        }
+        while let Some(event) = context.next() {
+            if let LibinputEvent::Keyboard(KeyboardEvent::Key(key_event)) = event {
+                let key_code = key_event.key();
+                let pressed = key_event.key_state() == KeyState::Pressed;
+                if let Some(current_state) = app_state.key_states.get_mut(&key_code) {
+                    if *current_state != pressed {
+                        *current_state = pressed;
+                        app_state.needs_redraw = true;
+                        log::debug!("Key {} state changed to: {}", key_code, pressed);
+                    }
+                }
+            }
+        }
+    }
+}
+
 // Helper to log if input devices are inaccessible after attempting to assign seat
 // This is a common issue and providing a hint can be useful.
-fn log_if_input_device_access_denied(app_config: &AppConfig, libinput_context: &input::Libinput) {
-    // This is a heuristic. If we have keys configured but libinput doesn't report any devices,
-    // it's a strong indicator of a permissions problem.
-    // A more direct check isn't easily available through libinput's public API after context creation.
-    // We can try to iterate devices, but libinput might not even list them if it can't open them.
-    // The errors during open_restricted are logged by MyLibinputInterface.
-    // This function is more about a summary warning if things look suspicious.
-
-    // let mut device_count = 0; // Unused
-    let mut temp_context = libinput_context.clone(); // Clone to iterate without affecting the main one
-    while let Some(_event) = temp_context.next() {
-        // We are just trying to see if there are any devices.
-        // A DeviceAdded event would be ideal, but iterating and checking type is also an option.
-        // However, libinput.next() consumes events. A non-event way to count devices is needed.
-        // Libinput's internal device list isn't directly exposed.
-        // For now, we rely on the errors logged by `open_restricted`.
-        // This function could be enhanced if a better check is found.
+// This function is called after `udev_assign_seat` has already been attempted.
+fn log_if_input_device_access_denied(app_config: &AppConfig, input_context_is_some: bool) {
+    // This function serves as a general reminder if input is configured but might not be working,
+    // prompting the user to check earlier, more specific error logs.
+    if !app_config.key.is_empty() && input_context_is_some {
+        // If we have an input_context and keys are configured, remind to check for device open errors.
+        log::info!(
+            "Libinput context was initialized. If keys do not respond, please check previous log messages \
+            for any 'Failed to open path' errors from the input system. These errors often indicate \
+            permission issues (e.g., the user running the application may not be in the 'input' group)."
+        );
+    } else if !app_config.key.is_empty() && !input_context_is_some {
+        // If keys are configured but there's no input_context, it means the initial udev_assign_seat likely failed.
+        // The error for that failure would have been logged already by the caller.
+        log::warn!(
+            "Key input is configured in keys.toml, but the libinput context could not be initialized \
+            (see previous errors). Key press/release events will not be monitored."
+        );
     }
-    // A simpler check: if `udev_assign_seat` succeeded but `open_restricted` failed for all relevant devices,
-    // that's a problem. MyLibinputInterface logs those failures.
-    // This function's main purpose now is to remind the user if config expects input but context might be "empty".
-    if !app_config.key.is_empty() {
-        // A definitive way to check if devices are usable is hard without iterating them.
-        // Relying on `MyLibinputInterface` logs for specific device open errors.
-        // This is a general reminder if input is expected.
-        log::debug!("Input context initialized. Check previous logs for any 'Failed to open path' errors from libinput if keys don't respond.");
-    }
+    // If app_config.key is empty, no warning is needed as no input is expected.
 }

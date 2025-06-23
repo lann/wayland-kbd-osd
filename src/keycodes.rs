@@ -23,6 +23,8 @@ pub fn get_keycode_from_string(key_name_str: &str) -> Result<u32, String> {
         _ => {} // Not an ambiguous key, proceed to main match
     }
 
+    // Match against the fully normalized key name.
+    // Normalization includes: to_lowercase(), removing '_', and removing '-' for non-symbolic names.
     match normalized_key_name.as_str() {
         // Standard Keys from input-event-codes.h
         "esc" | "escape" => Ok(1),
