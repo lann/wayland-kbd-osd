@@ -26,6 +26,14 @@ cleanup() {
 # Trap exit signals to ensure cleanup
 trap cleanup EXIT SIGINT SIGTERM
 
+# --- Build the application ---
+echo "Building the application in release mode..."
+if ! cargo build --release; then
+    echo "Failed to build the application. Exiting."
+    exit 1
+fi
+echo "Build successful."
+
 # --- Start Sway ---
 echo "Starting headless Sway with dbus-run-session and specific WLR environment variables..."
 # Added --unsupported-gpu, which is often needed for headless setups
@@ -74,8 +82,8 @@ if [ -z "$WAYLAND_DISPLAY_NAME" ]; then
 fi
 
 # --- Run the application ---
-echo "Starting $APP_NAME on WAYLAND_DISPLAY=$WAYLAND_DISPLAY_NAME..."
-WAYLAND_DISPLAY="$WAYLAND_DISPLAY_NAME" "$APP_NAME" &
+echo "Starting $APP_NAME --overlay on WAYLAND_DISPLAY=$WAYLAND_DISPLAY_NAME..."
+WAYLAND_DISPLAY="$WAYLAND_DISPLAY_NAME" "$APP_NAME" --overlay &
 APP_PID=$!
 
 # Wait for the application to start
