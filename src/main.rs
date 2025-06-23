@@ -1739,25 +1739,49 @@ fn main() {
                 ()
             );
             // Configure the layer surface
-            let anchor = match app_state.config.overlay.position {
+            let base_anchor = match app_state.config.overlay.position {
                 OverlayPosition::Top | OverlayPosition::TopCenter => {
                     zwlr_layer_surface_v1::Anchor::Top | zwlr_layer_surface_v1::Anchor::Left | zwlr_layer_surface_v1::Anchor::Right
                 }
                 OverlayPosition::Bottom | OverlayPosition::BottomCenter => {
                     zwlr_layer_surface_v1::Anchor::Bottom | zwlr_layer_surface_v1::Anchor::Left | zwlr_layer_surface_v1::Anchor::Right
                 }
-                OverlayPosition::Left => zwlr_layer_surface_v1::Anchor::Left,
-                OverlayPosition::Right => zwlr_layer_surface_v1::Anchor::Right,
-                OverlayPosition::Center => zwlr_layer_surface_v1::Anchor::empty(), // Centered by default if no anchor. If set_size(0,0) this might need L+R too, but error was for Bottom.
+                OverlayPosition::Left => zwlr_layer_surface_v1::Anchor::Left, // Implies vertical centering by not setting Top or Bottom
+                OverlayPosition::Right => zwlr_layer_surface_v1::Anchor::Right, // Implies vertical centering
+                OverlayPosition::Center => { // No anchors, compositor centers. Size must be non-zero.
+                    // If we set (0,0) size with empty anchor, it's often an error or fills screen.
+                    // The error is "y == 0 but anchor doesn't have top and bottom"
+                    // For Center, if we are setting size (0,0) initially, it might be safer to anchor all sides.
+                    // However, the specific error was with Bottom anchor. Let's stick to fixing that first.
+                    // If Center also causes issues with (0,0), it might need similar treatment or ensure initial size > 0.
+                    zwlr_layer_surface_v1::Anchor::Top | zwlr_layer_surface_v1::Anchor::Bottom | zwlr_layer_surface_v1::Anchor::Left | zwlr_layer_surface_v1::Anchor::Right
+                }
                 OverlayPosition::TopLeft => zwlr_layer_surface_v1::Anchor::Top | zwlr_layer_surface_v1::Anchor::Left,
                 OverlayPosition::TopRight => zwlr_layer_surface_v1::Anchor::Top | zwlr_layer_surface_v1::Anchor::Right,
                 OverlayPosition::BottomLeft => zwlr_layer_surface_v1::Anchor::Bottom | zwlr_layer_surface_v1::Anchor::Left,
                 OverlayPosition::BottomRight => zwlr_layer_surface_v1::Anchor::Bottom | zwlr_layer_surface_v1::Anchor::Right,
-                OverlayPosition::CenterLeft => zwlr_layer_surface_v1::Anchor::Left, // Rely on centering for vertical
-                OverlayPosition::CenterRight => zwlr_layer_surface_v1::Anchor::Right, // Rely on centering for vertical
+                // For CenterLeft/CenterRight, not specifying Top/Bottom means they are centered vertically.
+                // This should be fine with (0,0) size as horizontal anchors are set.
+                OverlayPosition::CenterLeft => zwlr_layer_surface_v1::Anchor::Left,
+                OverlayPosition::CenterRight => zwlr_layer_surface_v1::Anchor::Right,
             };
-            log::info!("Setting anchor to: {:?}", anchor);
-            layer_surface_obj.set_anchor(anchor);
+
+            // If initial size is (0,0) and anchor has Bottom but not Top, add Top.
+            // This is to prevent "y == 0 but anchor doesn't have top and bottom" error.
+            // Also, if position is Center and we are setting size (0,0), it's safer to anchor all sides.
+            let mut anchor_to_use = base_anchor;
+            if base_anchor.contains(zwlr_layer_surface_v1::Anchor::Bottom) && !base_anchor.contains(zwlr_layer_surface_v1::Anchor::Top) {
+                log::info!("Initial anchor includes Bottom but not Top. Adding Top anchor for initial (0,0) size stability.");
+                anchor_to_use = base_anchor | zwlr_layer_surface_v1::Anchor::Top;
+            } else if app_state.config.overlay.position == OverlayPosition::Center {
+                 // For OverlayPosition::Center, base_anchor was already set to all sides.
+                 // This explicit log helps confirm the thinking.
+                 log::info!("Position is Center. Using all-side anchor for initial (0,0) size stability.");
+            }
+
+
+            log::info!("Setting anchor to: {:?}", anchor_to_use);
+            layer_surface_obj.set_anchor(anchor_to_use);
 
             let margins = &app_state.config.overlay;
             log::info!("Setting margins: T={}, R={}, B={}, L={}", margins.margin_top, margins.margin_right, margins.margin_bottom, margins.margin_left);
