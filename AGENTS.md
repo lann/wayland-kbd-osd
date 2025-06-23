@@ -87,8 +87,16 @@ A script named `run_headless.sh` is provided for running `wayland-kbd-osd` in a 
 *   Builds the `wayland-kbd-osd` application (release mode).
 *   Starts a headless Sway session.
 *   Runs `wayland-kbd-osd` within this session, with input device access.
-*   Keeps the application and Sway running until manually terminated (Ctrl+C).
+*   By default, keeps the application and Sway running for 10 seconds. This timeout can be configured.
 *   Logs application output to `/tmp/app-headless.XXXXXX.log` and Sway output to `/tmp/sway-headless.XXXXXX.log`.
+
+**Timeout Configuration:**
+
+The script has an automatic shutdown mechanism to prevent it from running indefinitely.
+
+*   **Default Timeout:** 10 seconds.
+*   **Override Timeout:** Use the `-t <seconds>` flag to specify a different timeout duration. For example, `./run_headless.sh -t 30` will run for 30 seconds.
+*   **Run Indefinitely:** Use `-t 0` to disable the timeout and run until manually terminated (Ctrl+C) or until the application exits on its own.
 
 **Dependencies:**
 
@@ -116,7 +124,15 @@ sudo apt-get install -y sway dbus-x11 cargo # Plus libudev-dev, libinput-dev if 
     ```bash
     sg input -c "./run_headless.sh"
     ```
+    Example with a 5 second timeout:
+    ```bash
+    ./run_headless.sh -t 5
+    ```
+    Example to run indefinitely:
+    ```bash
+    ./run_headless.sh -t 0
+    ```
 3.  The script will build the application and then run it. Logs will be printed to temporary files (paths shown in script output).
-4.  Press `Ctrl+C` to terminate the script, which will also stop `wayland-kbd-osd` and `sway`.
+4.  If a timeout is set (default or via `-t`), the script will terminate automatically after that duration. Otherwise (with `-t 0`), press `Ctrl+C` to terminate the script, which will also stop `wayland-kbd-osd` and `sway`.
 
 This script is intended for active debugging. Check the application logs for information about input event processing.

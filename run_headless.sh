@@ -4,10 +4,13 @@
 SWAY_LOG_FILE=$(mktemp /tmp/sway-headless.XXXXXX.log)
 APP_LOG_FILE=$(mktemp /tmp/app-headless.XXXXXX.log)
 APP_NAME="$(pwd)/target/release/wayland-kbd-osd"
+DEFAULT_TIMEOUT=10 # Default timeout in seconds
+current_timeout=$DEFAULT_TIMEOUT
 
 # PIDs for cleanup
 DBUS_SWAY_PID=""
 APP_PID=""
+SLEEP_PID=""
 
 _cleanup_called=0
 cleanup() {
@@ -20,6 +23,11 @@ cleanup() {
         kill -SIGTERM "$APP_PID" 2>/dev/null
         sleep 0.2
         kill -SIGKILL "$APP_PID" 2>/dev/null || true
+    fi
+
+    if [ -n "$SLEEP_PID" ] && ps -p "$SLEEP_PID" > /dev/null; then
+        echo "CLEANUP: Stopping sleep PID: $SLEEP_PID..."
+        kill -SIGKILL "$SLEEP_PID" 2>/dev/null || true
     fi
 
     if [ -n "$DBUS_SWAY_PID" ] && ps -p "$DBUS_SWAY_PID" > /dev/null; then
@@ -45,6 +53,35 @@ cleanup() {
     echo "CLEANUP: Cleanup finished."
 }
 trap cleanup EXIT SIGINT SIGTERM
+
+# Parse command-line options
+while getopts ":t:" opt; do
+  case $opt in
+    t)
+      timeout_val="$OPTARG"
+      if ! [[ "$timeout_val" =~ ^[0-9]+$ ]]; then
+        echo "Error: Timeout value must be a non-negative integer." >&2
+        exit 1
+      fi
+      current_timeout=$timeout_val
+      ;;
+    \?)
+      echo "Invalid option: -$OPTARG" >&2
+      exit 1
+      ;;
+    :)
+      echo "Option -$OPTARG requires an argument." >&2
+      exit 1
+      ;;
+  esac
+done
+shift $((OPTIND-1))
+
+if [ "$current_timeout" -ne 0 ]; then
+    echo "SCRIPT: Configured to run with a timeout of $current_timeout seconds."
+else
+    echo "SCRIPT: Configured to run indefinitely (timeout set to 0)."
+fi
 
 echo "SCRIPT: Building the application..."
 if ! cargo build --release; then
@@ -87,12 +124,41 @@ echo "SCRIPT: Starting $APP_NAME on WAYLAND_DISPLAY=$WAYLAND_DISPLAY_NAME..."
 WAYLAND_DISPLAY="$WAYLAND_DISPLAY_NAME" "$APP_NAME" &> "$APP_LOG_FILE" &
 APP_PID=$!
 echo "SCRIPT: $APP_NAME started with PID $APP_PID."
-echo "SCRIPT: Running until APP ($APP_PID) exits or script is terminated externally."
 
-# Wait for the application to exit by itself.
-# If the script is killed externally, the EXIT trap will run cleanup.
-wait "$APP_PID"
-APP_EXIT_CODE=$?
-echo "SCRIPT: Application (PID $APP_PID) exited with code $APP_EXIT_CODE. Script will now exit."
+if [ "$current_timeout" -gt 0 ]; then
+    echo "SCRIPT: Waiting for app (PID $APP_PID) to exit or timeout of $current_timeout seconds to elapse."
+    # Start sleep in the background
+    sleep "$current_timeout" &
+    SLEEP_PID=$!
+
+    # Wait for either the application or the sleep to finish
+    wait -n "$APP_PID" "$SLEEP_PID" 2>/dev/null
+    APP_EXIT_CODE=$?
+
+    # Check which process finished
+    if ps -p "$APP_PID" > /dev/null; then
+        # APP_PID is still running, so sleep must have finished (timeout)
+        echo "SCRIPT: Timeout of $current_timeout seconds reached. Stopping application (PID $APP_PID)."
+        kill -SIGTERM "$APP_PID" 2>/dev/null
+        sleep 0.2
+        kill -SIGKILL "$APP_PID" 2>/dev/null || true
+        APP_EXIT_CODE=124 # Standard exit code for timeout
+    else
+        # Application exited before timeout
+        echo "SCRIPT: Application (PID $APP_PID) exited with code $APP_EXIT_CODE before timeout."
+    fi
+
+    # Ensure sleep is killed if it's still running (e.g., if app exited very quickly)
+    if [ -n "$SLEEP_PID" ] && ps -p "$SLEEP_PID" > /dev/null; then
+        kill -SIGKILL "$SLEEP_PID" 2>/dev/null || true
+    fi
+    SLEEP_PID="" # Clear SLEEP_PID as it's handled
+else
+    echo "SCRIPT: Running until APP ($APP_PID) exits or script is terminated externally (no timeout)."
+    wait "$APP_PID"
+    APP_EXIT_CODE=$?
+    echo "SCRIPT: Application (PID $APP_PID) exited with code $APP_EXIT_CODE. Script will now exit."
+fi
+
 # Cleanup will be called by EXIT trap.
 exit $APP_EXIT_CODE
