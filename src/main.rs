@@ -475,6 +475,10 @@ struct AppState {
     cached_offset_x: f32,
     cached_offset_y: f32,
     layout_cache_valid: bool,
+    initial_surface_size_set: bool, // Added for deferred sizing
+    target_output_identifier: Option<String>, // Stores name or index of the desired output
+    // We'll use a Option<u32> to store the actual wl_output name (registry global id) once identified
+    identified_target_wl_output_name: Option<u32>,
 }
 
 impl AppState {
@@ -496,11 +500,11 @@ impl AppState {
             buffer: None,
             mmap: None,
             temp_file: None,
-            configured_width: WINDOW_WIDTH,
-            configured_height: WINDOW_HEIGHT,
+            configured_width: WINDOW_WIDTH, // Initial fallback, will be updated
+            configured_height: WINDOW_HEIGHT, // Initial fallback, will be updated
             running: true,
             input_context: None,
-            config: app_config,
+            config: app_config.clone(), // Clone AppConfig for AppState
             key_states: key_states_map,
             needs_redraw: true, // Start with true to ensure initial draw
 
@@ -510,6 +514,126 @@ impl AppState {
             cached_offset_x: 0.0,
             cached_offset_y: 0.0,
             layout_cache_valid: false,
+            initial_surface_size_set: false,
+            target_output_identifier: app_config.overlay.screen.clone(), // Store configured screen specifier
+            identified_target_wl_output_name: None,
+        }
+    }
+
+    // Method to configure layer surface size once dimensions are known
+    fn attempt_configure_layer_surface_size(&mut self) { // Removed qh
+        if self.initial_surface_size_set || self.layer_surface.is_none() || self.surface.is_none() {
+            return; // Already set, or layer surface not ready
+        }
+
+        let mut screen_width_px = WINDOW_WIDTH; // Default if no output info
+        let mut screen_height_px = WINDOW_HEIGHT; // Default if no output info
+        let mut found_target_output_dimensions = false;
+
+        if let Some(target_wl_name) = self.identified_target_wl_output_name {
+            // A specific output was identified earlier
+            if let Some((_, _, _, info)) = self.outputs.iter().find(|(name, _, _, _)| *name == target_wl_name) {
+                if info.logical_width > 0 && info.logical_height > 0 {
+                    screen_width_px = info.logical_width;
+                    screen_height_px = info.logical_height;
+                    found_target_output_dimensions = true;
+                    log::info!("Using dimensions from explicitly targeted output (ID: {} Name: {:?}): {}x{}", target_wl_name, info.name.as_deref().unwrap_or("N/A"), screen_width_px, screen_height_px);
+                } else {
+                    log::warn!("Targeted output (ID: {}) found, but logical dimensions are not yet valid ({}x{}). Waiting.", target_wl_name, info.logical_width, info.logical_height);
+                    return; // Dimensions for target not ready yet
+                }
+            } else {
+                 log::warn!("Previously identified target output (ID: {}) no longer found in outputs list. This should not happen.", target_wl_name);
+                 // Proceed with fallback or first available, but this is unexpected.
+            }
+        }
+
+        if !found_target_output_dimensions {
+            // No specific target was identified, or it was lost. Try the first available output with valid dimensions.
+            if let Some((output_registry_name, _, _, info)) = self.outputs.iter().find(|(_,_,_,i)| i.logical_width > 0 && i.logical_height > 0) {
+                screen_width_px = info.logical_width;
+                screen_height_px = info.logical_height;
+                log::info!("Using first available screen with valid dimensions (ID: {}, Name: {:?}): {}x{}", output_registry_name, info.name.as_deref().unwrap_or("N/A"), screen_width_px, screen_height_px);
+                // If no target was specified, we can consider this one the target now for logging consistency.
+                if self.identified_target_wl_output_name.is_none() {
+                    self.identified_target_wl_output_name = Some(*output_registry_name);
+                }
+            } else {
+                log::warn!("No screen with valid logical dimensions found. Falling back to default {}x{} for overlay size calculation.", screen_width_px, screen_height_px);
+                // We might still proceed with fallback if this is the best we can do after some attempts.
+                // For now, if no output has dimensions, we simply return and wait for more events.
+                // This prevents premature sizing with fallbacks if dimensions are merely delayed.
+                // Only if all hope is lost (e.g. after a timeout in main loop) should we use hardcoded fallback.
+                // However, the test expects a fallback if the loop finishes, so we might need to allow it here.
+                // Let's allow fallback for now if no valid screen is found *at this point*.
+            }
+        }
+
+        let (layout_bound_w, layout_bound_h) = self.get_key_layout_bounds();
+        let layout_aspect_ratio = if layout_bound_h > 0.0 { layout_bound_w / layout_bound_h } else { 16.0/9.0 };
+
+        let mut target_w: u32 = 0;
+        let mut target_h: u32 = 0;
+
+        match self.config.overlay.size_width {
+            Some(SizeDimension::Pixels(px)) => target_w = px,
+            Some(SizeDimension::Ratio(r)) => target_w = (screen_width_px as f32 * r).round() as u32,
+            None => {}
+        }
+        match self.config.overlay.size_height {
+            Some(SizeDimension::Pixels(px)) => target_h = px,
+            Some(SizeDimension::Ratio(r)) => target_h = (screen_height_px as f32 * r).round() as u32,
+            None => {}
+        }
+
+        if target_w > 0 && target_h == 0 {
+            if layout_aspect_ratio > 0.0 { target_h = (target_w as f32 / layout_aspect_ratio).round() as u32; }
+            else { target_h = (target_w as f32 * (9.0/16.0)).round() as u32; }
+        } else if target_h > 0 && target_w == 0 {
+            if layout_aspect_ratio > 0.0 { target_w = (target_h as f32 * layout_aspect_ratio).round() as u32; }
+            else { target_w = (target_h as f32 * (16.0/9.0)).round() as u32; }
+        } else if target_w == 0 && target_h == 0 {
+            target_h = (screen_height_px as f32 * 0.3).round() as u32; // Default from OverlayConfig
+            if layout_aspect_ratio > 0.0 { target_w = (target_h as f32 * layout_aspect_ratio).round() as u32; }
+            else { target_w = (screen_width_px as f32 * 0.5).round() as u32; }
+            log::warn!("Overlay size was 0x0. Defaulting to {}x{}.", target_w, target_h);
+        }
+
+        if target_w > screen_width_px as u32 && screen_width_px > 0 {
+            let original_target_w = target_w; target_w = screen_width_px as u32;
+            if layout_aspect_ratio > 0.0 { target_h = (target_w as f32 / layout_aspect_ratio).round() as u32; }
+            log::info!("Target width {} exceeded screen width {}. Adjusted to {}x{} to fit screen width.", original_target_w, screen_width_px, target_w, target_h);
+        }
+        if target_h > screen_height_px as u32 && screen_height_px > 0 {
+            let original_target_h = target_h; target_h = screen_height_px as u32;
+            if layout_aspect_ratio > 0.0 { target_w = (target_h as f32 * layout_aspect_ratio).round() as u32; }
+            log::info!("Target height {} exceeded screen height {}. Adjusted to {}x{} to fit screen height.", original_target_h, screen_height_px, target_w, target_h);
+        }
+
+        // Ensure minimum size if calculations result in zero, but screen dimensions are valid
+        if target_w == 0 && screen_width_px > 0 { target_w = (screen_width_px as f32 * 0.1).round().max(1.0) as u32; }
+        if target_h == 0 && screen_height_px > 0 { target_h = (screen_height_px as f32 * 0.1).round().max(1.0) as u32; }
+        // If screen dimensions themselves are zero (e.g. headless without proper setup), use small absolute minimum.
+        if target_w == 0 {target_w = 100;}
+        if target_h == 0 {target_h = 50;}
+
+
+        log::info!("Attempting to set layer surface size to: {}x{}", target_w, target_h);
+        if let Some(ls) = self.layer_surface.as_ref() {
+            ls.set_size(target_w, target_h);
+            self.initial_surface_size_set = true;
+            // Surface commit is important to apply changes
+            if let Some(s) = self.surface.as_ref() {
+                s.commit();
+                log::info!("Layer surface size set and surface committed.");
+            } else {
+                log::error!("Cannot commit surface for layer size, surface is None.");
+            }
+            // The compositor should send a ::Configure event, which will trigger a draw.
+            // We might need to explicitly mark needs_redraw = true if configure doesn't always follow set_size immediately.
+            self.needs_redraw = true;
+        } else {
+            log::error!("Cannot set layer surface size, layer_surface is None.");
         }
     }
 
@@ -924,7 +1048,12 @@ impl Dispatch<wl_registry::WlRegistry, ()> for AppState {
         } else if let wl_registry::Event::GlobalRemove { name } = event {
             log::info!("Global removed: ID {}", name);
             state.outputs.retain(|(output_name, _, _, _)| *output_name != name);
-            // TODO: Consider if we need to None-out other globals if they are removed, e.g. layer_shell
+            if state.identified_target_wl_output_name == Some(name) {
+                log::warn!("Targeted wl_output (ID: {}) was removed. Clearing target.", name);
+                state.identified_target_wl_output_name = None;
+                // Potentially need to re-evaluate surface placement if it was on this output.
+                // For now, if size was already set, it might stay. If not, next valid output might be picked.
+            }
         }
     }
 }
@@ -932,37 +1061,40 @@ impl Dispatch<wl_registry::WlRegistry, ()> for AppState {
 // Dispatcher for wl_output
 impl Dispatch<wl_output::WlOutput, ()> for AppState {
     fn event(
-        _state: &mut AppState,
+        _state: &mut AppState, // Changed to _state as it's not used directly here
         _output: &wl_output::WlOutput,
         event: wl_output::Event,
         _data: &(),
         _conn: &Connection,
         _qh: &QueueHandle<AppState>,
     ) {
+        // Find the output_registry_name (ID) corresponding to this wl_output object
+        // This is a bit indirect here as we only have the wl_output proxy.
+        // We'd typically store the ID alongside the proxy in AppState.outputs if we need to link back.
+        // For now, these logs are general. The zxdg_output_v1 events are more critical for sizing.
+
         match event {
             wl_output::Event::Geometry { x, y, physical_width, physical_height, subpixel, make, model, transform } => {
-                log::debug!("wl_output Geometry: x={}, y={}, physical_width={}, physical_height={}, subpixel={:?}, make={}, model={}, transform={:?}",
-                    x, y, physical_width, physical_height, subpixel, make, model, transform);
+                log::debug!("wl_output ({:?}) Geometry: x={}, y={}, phys_w={}, phys_h={}, subpixel={:?}, make={}, model={}, transform={:?}",
+                    _output.id(), x, y, physical_width, physical_height, subpixel, make, model, transform);
             }
             wl_output::Event::Mode { flags, width, height, refresh } => {
-                log::debug!("wl_output Mode: flags={:?}, width={}, height={}, refresh={}", flags, width, height, refresh);
+                log::debug!("wl_output ({:?}) Mode: flags={:?}, width={}, height={}, refresh={}", _output.id(), flags, width, height, refresh);
             }
             wl_output::Event::Done => {
-                log::debug!("wl_output Done");
+                log::debug!("wl_output ({:?}) Done", _output.id());
             }
             wl_output::Event::Scale { factor } => {
-                log::debug!("wl_output Scale: factor={}", factor);
+                log::debug!("wl_output ({:?}) Scale: factor={}", _output.id(), factor);
             }
             wl_output::Event::Name { name } => {
-                // This is for wl_output name, which is often not very descriptive (e.g., "wayland-0")
-                 log::debug!("wl_output Name: {}", name);
+                 log::debug!("wl_output ({:?}) Name: {}", _output.id(), name);
             }
             wl_output::Event::Description { description } => {
-                // This is for wl_output description, usually more descriptive
-                 log::debug!("wl_output Description: {}", description);
+                 log::debug!("wl_output ({:?}) Description: {}", _output.id(), description);
             }
             _ => {
-                log::trace!("Unhandled wl_output event: {:?}", event);
+                log::trace!("Unhandled wl_output ({:?}) event: {:?}", _output.id(), event);
             }
         }
     }
@@ -979,7 +1111,6 @@ impl Dispatch<zxdg_output_manager_v1::ZxdgOutputManagerV1, ()> for AppState {
         _conn: &Connection,
         _qh: &QueueHandle<AppState>,
     ) {
-        // zxdg_output_manager_v1 has no events for the client to handle
         log::trace!("zxdg_output_manager_v1 event: {:?}", event);
     }
 }
@@ -992,39 +1123,60 @@ impl Dispatch<zxdg_output_v1::ZxdgOutputV1, ()> for AppState {
         event: zxdg_output_v1::Event,
         _data: &(),
         _conn: &Connection,
-        _qh: &QueueHandle<AppState>,
+        _qh: &QueueHandle<AppState>, // Renamed qh back to _qh as it's unused
     ) {
-        let output_entry = state.outputs.iter_mut().find(|(_, _, xdg_opt, _)| xdg_opt.as_ref().map_or(false, |x| x == xdg_output));
+        // Find the entry in state.outputs that corresponds to this xdg_output object
+        let output_info_tuple = state.outputs.iter_mut().find(|(_, _, xdg_opt, _)| xdg_opt.as_ref().map_or(false, |x| x == xdg_output));
 
-        if let Some((_, _, _, info)) = output_entry {
+        if let Some((output_registry_name, _, _, info)) = output_info_tuple {
+            let current_output_id = *output_registry_name;
             match event {
                 zxdg_output_v1::Event::LogicalPosition { x, y } => {
-                    log::debug!("zxdg_output_v1 ({:?}) LogicalPosition: x={}, y={}", xdg_output.id(), x, y);
+                    log::debug!("zxdg_output_v1 (ID: {}, wl_id: {:?}) LogicalPosition: x={}, y={}", current_output_id, xdg_output.id(), x, y);
                 }
                 zxdg_output_v1::Event::LogicalSize { width, height } => {
-                    log::debug!("zxdg_output_v1 ({:?}) LogicalSize: width={}, height={}", xdg_output.id(), width, height);
+                    log::debug!("zxdg_output_v1 (ID: {}, wl_id: {:?}) LogicalSize: width={}, height={}", current_output_id, xdg_output.id(), width, height);
                     info.logical_width = width;
                     info.logical_height = height;
+
+                    // Attempt to configure size if this is the target output or if no target is set yet
+                    if !state.initial_surface_size_set {
+                        if state.identified_target_wl_output_name.is_none() || state.identified_target_wl_output_name == Some(current_output_id) {
+                            if info.logical_width > 0 && info.logical_height > 0 {
+                                log::info!("LogicalSize event for relevant output (ID: {}) received with valid dimensions. Attempting to configure layer surface size.", current_output_id);
+                                state.attempt_configure_layer_surface_size(); // Removed qh
+                            }
+                        }
+                    }
                 }
                 zxdg_output_v1::Event::Done => {
-                    log::debug!("zxdg_output_v1 ({:?}) Done. Current info: {:?}", xdg_output.id(), info);
-                    // Here, all info for this output should be collected.
-                    // We might want to trigger a redraw or re-evaluation of overlay size/position if it depends on this.
+                    log::debug!("zxdg_output_v1 (ID: {}, wl_id: {:?}) Done. Current info: {:?}", current_output_id, xdg_output.id(), info);
+                    // This is a good place to attempt sizing, as all properties for this output have been sent.
+                    if !state.initial_surface_size_set {
+                        if state.identified_target_wl_output_name.is_none() || state.identified_target_wl_output_name == Some(current_output_id) {
+                            if info.logical_width > 0 && info.logical_height > 0 {
+                                log::info!("Done event for relevant output (ID: {}) received with valid dimensions. Attempting to configure layer surface size.", current_output_id);
+                                state.attempt_configure_layer_surface_size(); // Removed qh
+                            } else {
+                                log::warn!("Done event for relevant output (ID: {}) received, but dimensions still invalid ({}x{}). Size configuration deferred.", current_output_id, info.logical_width, info.logical_height);
+                            }
+                        }
+                    }
                 }
                 zxdg_output_v1::Event::Name { name } => {
-                    log::info!("zxdg_output_v1 ({:?}) Name: {}", xdg_output.id(), name);
+                    log::info!("zxdg_output_v1 (ID: {}, wl_id: {:?}) Name: {}", current_output_id, xdg_output.id(), name);
                     info.name = Some(name);
                 }
                 zxdg_output_v1::Event::Description { description } => {
-                    log::info!("zxdg_output_v1 ({:?}) Description: {}", xdg_output.id(), description);
+                    log::info!("zxdg_output_v1 (ID: {}, wl_id: {:?}) Description: {}", current_output_id, xdg_output.id(), description);
                     info.description = Some(description);
                 }
                 _ => {
-                     log::trace!("Unhandled zxdg_output_v1 event: {:?}", event);
+                     log::trace!("Unhandled zxdg_output_v1 (ID: {}, wl_id: {:?}) event: {:?}", current_output_id, xdg_output.id(), event);
                 }
             }
         } else {
-            log::warn!("Received zxdg_output_v1 event for an unknown output object: {:?}", xdg_output.id());
+            log::warn!("Received zxdg_output_v1 event for an xdg_output object not found in AppState.outputs: {:?}", xdg_output.id());
         }
     }
 }
@@ -1484,21 +1636,38 @@ fn main() {
 
     let mut event_queue = conn.new_event_queue();
     let qh = event_queue.handle();
-    let mut app_state = AppState::new(app_config.clone());
+    let mut app_state = AppState::new(app_config.clone()); // app_config is cloned into AppState here
     let _registry = conn.display().get_registry(&qh, ());
 
-    log::trace!("Dispatching initial events to bind globals...");
-    if event_queue.roundtrip(&mut app_state).is_err() {
-        log::error!("Error during initial roundtrip for global binding.");
-        process::exit(1);
+    log::trace!("Dispatching initial events to bind globals and get initial output info...");
+    // Perform a few roundtrips to ensure globals are bound and initial output events (like names) are processed.
+    for _ in 0..3 { // Loop a few times to catch initial events.
+        if event_queue.dispatch_pending(&mut app_state).is_err() {
+            log::error!("Error dispatching events during initial setup.");
+            break;
+        }
+        if conn.flush().is_err() {
+            log::error!("Error flushing connection during initial setup.");
+            break;
+        }
     }
+    // A final roundtrip can sometimes help ensure all initial announcements are processed.
+    if event_queue.roundtrip(&mut app_state).is_err() {
+        log::error!("Error during final initial roundtrip for global binding.");
+        // Not exiting here, as some globals might still be bound.
+    }
+
 
     if app_state.compositor.is_none() || app_state.shm.is_none() || app_state.xdg_wm_base.is_none() {
         log::error!("Failed to bind essential Wayland globals (wl_compositor, wl_shm, xdg_wm_base).");
         eprintln!("Could not bind essential Wayland globals. This usually means the Wayland compositor is missing support or encountered an issue.");
         process::exit(1);
     }
-    log::info!("Essential Wayland globals bound.");
+    log::info!("Essential Wayland globals bound. Number of outputs found: {}", app_state.outputs.len());
+    for (idx, (name, _, _, info)) in app_state.outputs.iter().enumerate() {
+        log::debug!("  Output [{}], ID: {}, Name: {:?}, Desc: {:?}, Logical Dims: {}x{}", idx, name, info.name, info.description, info.logical_width, info.logical_height);
+    }
+
 
     let interface = MyLibinputInterface;
     let mut libinput_context = input::Libinput::new_with_udev(interface);
@@ -1520,44 +1689,50 @@ fn main() {
     if cli.overlay {
         log::info!("Overlay mode requested. Attempting to use wlr-layer-shell.");
         if let Some(layer_shell) = app_state.layer_shell.as_ref() {
-            let mut selected_wl_output: Option<&wl_output::WlOutput> = None;
+            let mut selected_wl_output_proxy: Option<&wl_output::WlOutput> = None;
+            // app_state.target_output_identifier was already populated from config in AppState::new
 
-            if let Some(target_screen_specifier) = app_state.config.overlay.screen.as_ref() {
-                log::info!("Attempting to find screen specified as: '{}'", target_screen_specifier);
+            if let Some(target_screen_specifier) = app_state.target_output_identifier.as_ref() {
+                log::info!("Attempting to find screen specified in config as: '{}'", target_screen_specifier);
                 // Try to parse as index first
                 if let Ok(target_idx) = target_screen_specifier.parse::<usize>() {
-                    if let Some((_, wl_output, _, info)) = app_state.outputs.get(target_idx) {
-                        selected_wl_output = Some(wl_output);
-                        log::info!("Selected screen by index {}: {:?}", target_idx, info.name.as_deref().unwrap_or("N/A"));
+                    if let Some((output_registry_name, wl_output_proxy_ref, _, info)) = app_state.outputs.get(target_idx) {
+                        selected_wl_output_proxy = Some(wl_output_proxy_ref);
+                        app_state.identified_target_wl_output_name = Some(*output_registry_name);
+                        log::info!("Selected screen by index {}: ID {}, Name: {:?}", target_idx, output_registry_name, info.name.as_deref().unwrap_or("N/A"));
                     } else {
-                        log::warn!("Screen index {} out of bounds ({} outputs available). Compositor will choose.", target_idx, app_state.outputs.len());
+                        log::warn!("Screen index {} from config is out of bounds ({} outputs available). Compositor will choose output.", target_idx, app_state.outputs.len());
                     }
                 } else {
                     // Try to match by name (zxdg_output_v1 name or description)
-                    let mut found = false;
-                    for (_, wl_output, _, info) in &app_state.outputs {
+                    let mut matched_by_name = false;
+                    for (output_registry_name, wl_output_proxy_ref, _, info) in &app_state.outputs {
                         if info.name.as_deref() == Some(target_screen_specifier) || info.description.as_deref() == Some(target_screen_specifier) {
-                            selected_wl_output = Some(wl_output);
-                            log::info!("Selected screen by name/description '{}': {:?}", target_screen_specifier, info.name.as_deref().unwrap_or("N/A"));
-                            found = true;
+                            selected_wl_output_proxy = Some(wl_output_proxy_ref);
+                            app_state.identified_target_wl_output_name = Some(*output_registry_name);
+                            matched_by_name = true;
+                            log::info!("Selected screen by name/description '{}': ID {}, Name: {:?}", target_screen_specifier, output_registry_name, info.name.as_deref().unwrap_or("N/A"));
                             break;
                         }
                     }
-                    if !found {
-                        log::warn!("Screen specifier '{}' not found by name or description. Compositor will choose.", target_screen_specifier);
+                    if !matched_by_name {
+                        log::warn!("Screen specifier '{}' from config not found by name or description. Compositor will choose output.", target_screen_specifier);
                         log::debug!("Available outputs for matching by name/description:");
-                        for (idx, (_, _, _, info)) in app_state.outputs.iter().enumerate() {
-                            log::debug!("  [{}]: Name: {:?}, Description: {:?}", idx, info.name, info.description);
+                        for (idx, (id, _, _, i)) in app_state.outputs.iter().enumerate() {
+                            log::debug!("  [{}]: ID: {}, Name: {:?}, Description: {:?}", idx, id, i.name, i.description);
                         }
                     }
                 }
             } else {
-                log::info!("No specific screen configured. Compositor will choose.");
+                log::info!("No specific screen configured (overlay.screen is None). Compositor will choose output.");
+                // If no screen is specified, we might pick the first one with dimensions later,
+                // or let the compositor decide if selected_wl_output_proxy remains None.
+                // For now, identified_target_wl_output_name remains None.
             }
 
             let layer_surface_obj = layer_shell.get_layer_surface(
                 &surface,
-                selected_wl_output, // output: None means compositor chooses
+                selected_wl_output_proxy, // output: None means compositor chooses
                 zwlr_layer_shell_v1::Layer::Overlay,
                 "wayland-kbd-osd".to_string(), // namespace
                 &qh,
@@ -1589,119 +1764,14 @@ fn main() {
             layer_surface_obj.set_keyboard_interactivity(zwlr_layer_surface_v1::KeyboardInteractivity::None);
             layer_surface_obj.set_exclusive_zone(0); // Do not reserve space
 
-            // Determine target screen dimensions for size calculation
-            let mut screen_width_px = WINDOW_WIDTH; // Default if no output info
-            let mut screen_height_px = WINDOW_HEIGHT; // Default if no output info
+            // Initial size is set to (0,0), meaning compositor decides or use anchor.
+            // Actual size will be set later by attempt_configure_layer_surface_size
+            // once screen dimensions are known.
+            log::info!("Setting initial layer surface size to (0,0). Actual size will be configured once screen dimensions are known.");
+            layer_surface_obj.set_size(0, 0);
 
-            if let Some(wl_output) = selected_wl_output {
-                if let Some((_, _, _, info)) = app_state.outputs.iter().find(|(_, o, _, _)| o == wl_output) {
-                    if info.logical_width > 0 && info.logical_height > 0 {
-                        screen_width_px = info.logical_width;
-                        screen_height_px = info.logical_height;
-                        log::info!("Using selected screen dimensions for size calculation: {}x{}", screen_width_px, screen_height_px);
-                    } else {
-                        // This warning implies the waiting loop timed out or failed for the selected screen.
-                        log::warn!("Selected screen {:?} still has no logical dimensions after wait loop. Falling back to default {}x{} for size calculation.", info.name.as_deref().unwrap_or("N/A"), screen_width_px, screen_height_px);
-                    }
-                }
-            } else if let Some((_, _, _, info)) = app_state.outputs.first() { // Default to first output if none selected
-                if info.logical_width > 0 && info.logical_height > 0 {
-                    screen_width_px = info.logical_width;
-                    screen_height_px = info.logical_height;
-                    log::info!("Using first available screen dimensions for size calculation: {}x{}", screen_width_px, screen_height_px);
-                } else {
-                     // This warning implies the waiting loop timed out or failed for the first available screen.
-                     log::warn!("First available screen {:?} still has no logical dimensions after wait loop. Falling back to default {}x{} for size calculation.", info.name.as_deref().unwrap_or("N/A"), screen_width_px, screen_height_px);
-                }
-            } else {
-                log::warn!("No screens found/selected (even after wait loop). Using default window size {}x{} for overlay size calculation.", screen_width_px, screen_height_px);
-            }
-
-            let (layout_bound_w, layout_bound_h) = app_state.get_key_layout_bounds();
-            let layout_aspect_ratio = if layout_bound_h > 0.0 { layout_bound_w / layout_bound_h } else { 16.0/9.0 }; // Default aspect if no keys
-
-            let mut target_w: u32 = 0; // 0 means compositor decides or derive from other dimension
-            let mut target_h: u32 = 0;
-
-            match app_state.config.overlay.size_width {
-                Some(SizeDimension::Pixels(px)) => target_w = px,
-                Some(SizeDimension::Ratio(r)) => target_w = (screen_width_px as f32 * r).round() as u32,
-                None => {}
-            }
-            match app_state.config.overlay.size_height {
-                Some(SizeDimension::Pixels(px)) => target_h = px,
-                Some(SizeDimension::Ratio(r)) => target_h = (screen_height_px as f32 * r).round() as u32,
-                None => {}
-            }
-
-            // Preserve aspect ratio if one dimension is zero (or not specified)
-            if target_w > 0 && target_h == 0 {
-                if layout_aspect_ratio > 0.0 {
-                    target_h = (target_w as f32 / layout_aspect_ratio).round() as u32;
-                } else { // Should not happen if layout_aspect_ratio has a default
-                    target_h = (target_w as f32 * (9.0/16.0)).round() as u32; // Default to 16:9 portraitish if layout is zero area
-                }
-            } else if target_h > 0 && target_w == 0 {
-                if layout_aspect_ratio > 0.0 {
-                    target_w = (target_h as f32 * layout_aspect_ratio).round() as u32;
-                } else {
-                     target_w = (target_h as f32 * (16.0/9.0)).round() as u32; // Default to 16:9 landscapeish
-                }
-            } else if target_w == 0 && target_h == 0 {
-                 // This case means neither width nor height was specified in config.
-                 // The default for size_height is Ratio(0.3), so this block might not be hit often
-                 // unless defaults are removed or both are explicitly set to null/None in TOML.
-                 // If compositor also suggests 0,0, it could be an issue.
-                 // For now, let layer_surface.set_size(0,0) pass through.
-                 // Compositor might give a default size or size based on content (which is tricky here).
-                 log::warn!("Overlay width and height are both zero. Compositor will determine size. This might be very small.");
-            }
-
-
-            // Ensure calculated size does not exceed screen dimensions, preserving aspect ratio.
-            // This is a "max size" constraint.
-            if target_w > screen_width_px as u32 && screen_width_px > 0 {
-                let original_target_w = target_w;
-                target_w = screen_width_px as u32;
-                if layout_aspect_ratio > 0.0 { // Avoid division by zero
-                    target_h = (target_w as f32 / layout_aspect_ratio).round() as u32;
-                }
-                 log::info!("Target width {} exceeded screen width {}. Adjusted to {}x{} to fit screen width.", original_target_w, screen_width_px, target_w, target_h);
-            }
-            if target_h > screen_height_px as u32 && screen_height_px > 0 {
-                let original_target_h = target_h;
-                target_h = screen_height_px as u32;
-                // If width was also capped, this might shrink it further.
-                // If width was not capped, or if this cap is more restrictive:
-                if layout_aspect_ratio > 0.0 { // Avoid division by zero
-                     target_w = (target_h as f32 * layout_aspect_ratio).round() as u32;
-                }
-                log::info!("Target height {} exceeded screen height {}. Adjusted to {}x{} to fit screen height.", original_target_h, screen_height_px, target_w, target_h);
-            }
-
-            // Final safety check for zero dimensions if layout was empty.
-            // If target_w or target_h is still 0, layer-shell expects this to mean "derive from anchor".
-            // E.g. anchor left+right and width 0 means full width.
-            // If no anchors in a dimension, 0 means "as small as possible" or compositor default.
-            // We want a defined size if possible.
-            if target_w == 0 && target_h == 0 && (layout_bound_w > 0.0 || layout_bound_h > 0.0) {
-                // This implies config asked for 0x0, but we have a layout.
-                // Fallback to a small portion of screen, e.g., 30% height and derive width.
-                target_h = (screen_height_px as f32 * 0.3).round() as u32;
-                if layout_aspect_ratio > 0.0 {
-                    target_w = (target_h as f32 * layout_aspect_ratio).round() as u32;
-                } else {
-                    target_w = (screen_width_px as f32 * 0.5).round() as u32; // Fallback width
-                }
-                log::warn!("Overlay size was 0x0 despite having a layout. Defaulting to {}x{}.", target_w, target_h);
-            }
-
-
-            log::info!("Setting layer surface size to: {}x{}", target_w, target_h);
-            layer_surface_obj.set_size(target_w, target_h);
-
+            // We still need to commit the surface for the layer surface to be mapped.
             // The app_state.configured_width/height will be updated by the compositor via ::Configure event.
-            // We pass our desired size to layer_surface.set_size(). The compositor might adjust it.
             // The drawing logic uses app_state.configured_width/height.
 
             app_state.layer_surface = Some(layer_surface_obj);
@@ -1732,74 +1802,25 @@ fn main() {
 
     // If in overlay mode, wait for screen dimensions to be populated
     if cli.overlay && app_state.layer_shell.is_some() {
-        log::info!("Waiting for screen dimensions to be populated for overlay mode...");
-        let mut dimensions_populated = false;
-        // Max attempts to prevent infinite loop. ~100 iterations.
-        // With typical event dispatch, this should be very quick if events are pending,
-        // or rely on the poll timeout in the main loop if no events arrive.
-        // No explicit sleep here unless found necessary.
-        for attempt in 0..100 {
-            let mut target_output_info: Option<&OutputInfo> = None;
+        // The "wait loop" for dimensions is now less critical for initial sizing,
+        // as sizing is deferred to event handlers.
+        // However, dispatching some initial events is still good practice to ensure output names/descriptions
+        // are processed if a specific output was targeted by name/description.
+        // The main selection logic for `identified_target_wl_output_name` already ran before creating the layer surface.
+        // We will now try to explicitly trigger the sizing logic if possible.
 
-            if let Some(target_screen_specifier) = app_state.config.overlay.screen.as_ref() {
-                // Try to parse as index first
-                if let Ok(target_idx) = target_screen_specifier.parse::<usize>() {
-                    if let Some((_, _, _, info)) = app_state.outputs.get(target_idx) {
-                        target_output_info = Some(info);
-                    }
-                } else {
-                    // Try to match by name or description
-                    for (_, _, _, info) in &app_state.outputs {
-                        if info.name.as_deref() == Some(target_screen_specifier) || info.description.as_deref() == Some(target_screen_specifier) {
-                            target_output_info = Some(info);
-                            break;
-                        }
-                    }
-                }
-            } else {
-                // If no screen is specified, default to the first one
-                if let Some((_, _, _, info)) = app_state.outputs.first() {
-                    target_output_info = Some(info);
-                }
-            }
+        log::info!("Initial layer surface setup complete. Attempting to configure size based on currently known screen dimensions...");
+        app_state.attempt_configure_layer_surface_size(); // Removed qh
 
-            if let Some(info) = target_output_info {
-                if info.logical_width > 0 && info.logical_height > 0 {
-                    log::info!("Screen dimensions populated for {:?}: {}x{}",
-                               info.name.as_deref().unwrap_or("N/A"), info.logical_width, info.logical_height);
-                    dimensions_populated = true;
-                    break;
-                }
-            }
-
-            // Dispatch pending events
-            // Need to handle potential errors from dispatch_pending more gracefully if it can fail often.
-            if event_queue.dispatch_pending(&mut app_state).is_err() {
-                 log::error!("Error dispatching events while waiting for screen dimensions.");
-                 // Potentially break or handle error, for now log and continue trying for a bit
-            }
-            // A small sleep might be useful if dispatch_pending is too fast and burns CPU,
-            // but typically event dispatch should block or be efficient.
-            // std::thread::sleep(std::time::Duration::from_millis(10)); // Optional: if CPU usage is high
-            if conn.flush().is_err() {
-                log::error!("Error flushing connection while waiting for screen dimensions.");
-                // Potentially break
-            }
-            if attempt % 20 == 0 && attempt > 0 { // Log progress occasionally
-                log::debug!("Still waiting for screen dimensions... (attempt {})", attempt + 1);
-            }
-        }
-
-        if !dimensions_populated {
-            log::warn!("Timed out waiting for screen dimensions. Overlay positioning/sizing might use defaults or be incorrect.");
+        if !app_state.initial_surface_size_set {
+            log::warn!("Initial attempt to set layer surface size deferred as screen dimensions are not yet known or not valid for the target output. Will retry upon receiving output events.");
         }
     }
 
-
     // An explicit draw call here might be needed if the first configure doesn't trigger it,
     // or if we want to show something before the first configure.
-    // However, the xdg_surface configure event should trigger the first draw.
-    log::info!("Initial roundtrip and dimension wait complete. Wayland window should be configured. Waiting for events...");
+    // However, the xdg_surface or layer_surface configure event should trigger the first draw.
+    log::info!("Initial setup phase complete. Wayland window should be configured or awaiting configuration. Waiting for events...");
 
     // Imports for LibinputEvent, KeyboardEvent, KeyState, KeyboardEventTrait, WaylandError
     // are now at the top of the module.
