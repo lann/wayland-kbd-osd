@@ -76,6 +76,8 @@ Ensure `wayland-kbd-osd` is built (e.g., `cargo build --release`). The script ex
 
 After execution, `screenshot.png` will be created.
 
+**Important:** If you make any changes to the visual appearance of the OSD (e.g., key layout, colors, fonts, window size), you **must** regenerate the `screenshot.png` by running `./take_screenshot.sh` and commit the updated screenshot along with your code changes. This ensures the screenshot accurately reflects the current state of the application.
+
 **Note on Input Device Errors:**
 In environments without direct access to input devices (e.g., many CI systems), `wayland-kbd-osd` may log errors about being unable to open `/dev/input/event*` files. This is expected. The script's primary purpose is to verify that the OSD *displays* correctly; functional input reading in such restricted environments is a separate concern. The OSD should ideally still render its UI even if it cannot access physical input devices.
 

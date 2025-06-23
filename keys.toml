@@ -1,664 +1,695 @@
-# Default 85% (Tenkeyless) Keyboard Layout
-# Coordinates are relative and will be scaled by the application.
-# Standard key size is assumed to be 50x50 units, with spacing of 5 units.
-# X coordinates increase to the right, Y coordinates increase downwards.
-
-# Function Row
 [[key]]
 name = "Esc"
-x = 0
-y = 0
-width = 50
-height = 50
-# keycode = "esc" # Test defaulting
+left = 0.0
+top = 0.0
+width = 50.0
+height = 50.0
+keycode = "esc"
 
 [[key]]
 name = "F1"
-x = 75
-y = 0
-width = 50
-height = 50
-# keycode = "f1"
+left = 80.0
+top = 0.0
+width = 50.0
+height = 50.0
+keycode = "f1"
 
 [[key]]
 name = "F2"
-x = 130
-y = 0
-width = 50
-height = 50
+left = 135.0
+top = 0.0
+width = 50.0
+height = 50.0
+keycode = "f2"
 
 [[key]]
 name = "F3"
-x = 185
-y = 0
-width = 50
-height = 50
+left = 190.0
+top = 0.0
+width = 50.0
+height = 50.0
+keycode = "f3"
 
 [[key]]
 name = "F4"
-x = 240
-y = 0
-width = 50
-height = 50
+left = 245.0
+top = 0.0
+width = 50.0
+height = 50.0
+keycode = "f4"
 
 [[key]]
 name = "F5"
-x = 320
-y = 0
-width = 50
-height = 50
+left = 325.0
+top = 0.0
+width = 50.0
+height = 50.0
+keycode = "f5"
 
 [[key]]
 name = "F6"
-x = 375
-y = 0
-width = 50
-height = 50
+left = 380.0
+top = 0.0
+width = 50.0
+height = 50.0
+keycode = "f6"
 
 [[key]]
 name = "F7"
-x = 430
-y = 0
-width = 50
-height = 50
+left = 435.0
+top = 0.0
+width = 50.0
+height = 50.0
+keycode = "f7"
 
 [[key]]
 name = "F8"
-x = 485
-y = 0
-width = 50
-height = 50
+left = 490.0
+top = 0.0
+width = 50.0
+height = 50.0
+keycode = "f8"
 
 [[key]]
 name = "F9"
-x = 565
-y = 0
-width = 50
-height = 50
+left = 570.0
+top = 0.0
+width = 50.0
+height = 50.0
+keycode = "f9"
 
 [[key]]
 name = "F10"
-x = 620
-y = 0
-width = 50
-height = 50
+left = 625.0
+top = 0.0
+width = 50.0
+height = 50.0
+keycode = "f10"
 
 [[key]]
 name = "F11"
-x = 675
-y = 0
-width = 50
-height = 50
+left = 680.0
+top = 0.0
+width = 50.0
+height = 50.0
+keycode = "f11"
 
 [[key]]
 name = "F12"
-x = 730
-y = 0
-width = 50
-height = 50
-# keycode = "f12"
+left = 735.0
+top = 0.0
+width = 50.0
+height = 50.0
+keycode = "f12"
 
-# Number Row
 [[key]]
 name = "`"
-x = 0
-y = 55
-width = 50
-height = 50
+left = 0.0
+top = 55.0
+width = 50.0
+height = 50.0
 keycode = "grave"
 
 [[key]]
 name = "1"
-x = 55
-y = 55
-width = 50
-height = 50
-# keycode = "1"
+left = 55.0
+top = 55.0
+width = 50.0
+height = 50.0
+keycode = "1"
 
 [[key]]
 name = "2"
-x = 110
-y = 55
-width = 50
-height = 50
+left = 110.0
+top = 55.0
+width = 50.0
+height = 50.0
+keycode = "2"
 
 [[key]]
 name = "3"
-x = 165
-y = 55
-width = 50
-height = 50
+left = 165.0
+top = 55.0
+width = 50.0
+height = 50.0
+keycode = "3"
 
 [[key]]
 name = "4"
-x = 220
-y = 55
-width = 50
-height = 50
+left = 220.0
+top = 55.0
+width = 50.0
+height = 50.0
+keycode = "4"
 
 [[key]]
 name = "5"
-x = 275
-y = 55
-width = 50
-height = 50
+left = 275.0
+top = 55.0
+width = 50.0
+height = 50.0
+keycode = "5"
 
 [[key]]
 name = "6"
-x = 330
-y = 55
-width = 50
-height = 50
+left = 330.0
+top = 55.0
+width = 50.0
+height = 50.0
+keycode = "6"
 
 [[key]]
 name = "7"
-x = 385
-y = 55
-width = 50
-height = 50
+left = 385.0
+top = 55.0
+width = 50.0
+height = 50.0
+keycode = "7"
 
 [[key]]
 name = "8"
-x = 440
-y = 55
-width = 50
-height = 50
+left = 440.0
+top = 55.0
+width = 50.0
+height = 50.0
+keycode = "8"
 
 [[key]]
 name = "9"
-x = 495
-y = 55
-width = 50
-height = 50
+left = 495.0
+top = 55.0
+width = 50.0
+height = 50.0
+keycode = "9"
 
 [[key]]
 name = "0"
-x = 550
-y = 55
-width = 50
-height = 50
+left = 550.0
+top = 55.0
+width = 50.0
+height = 50.0
+keycode = "0"
 
 [[key]]
 name = "-"
-x = 605
-y = 55
-width = 50
-height = 50
+left = 605.0
+top = 55.0
+width = 50.0
+height = 50.0
 keycode = "minus"
 
 [[key]]
 name = "="
-x = 660
-y = 55
-width = 50
-height = 50
+left = 660.0
+top = 55.0
+width = 50.0
+height = 50.0
 keycode = "equal"
 
 [[key]]
 name = "Backspace"
-x = 715
-y = 55
-width = 105 # Wider
-height = 50
-# keycode = "backspace"
+left = 715.0
+top = 55.0
+width = 100.0
+height = 50.0
+keycode = "backspace"
 
-# Top Alpha Row (QWERTY)
 [[key]]
 name = "Tab"
-x = 40 # Adjusted from 0
-y = 110
-width = 80 # Wider
-height = 50
-# keycode = "tab"
+left = 0.0
+top = 110.0
+width = 75.0
+height = 50.0
+keycode = "tab"
 
 [[key]]
 name = "Q"
-x = 85
-y = 110
-width = 50
-height = 50
+left = 80.0
+top = 110.0
+width = 50.0
+height = 50.0
+keycode = "q"
 
 [[key]]
 name = "W"
-x = 140
-y = 110
-width = 50
-height = 50
+left = 135.0
+top = 110.0
+width = 50.0
+height = 50.0
+keycode = "w"
 
 [[key]]
 name = "E"
-x = 195
-y = 110
-width = 50
-height = 50
+left = 190.0
+top = 110.0
+width = 50.0
+height = 50.0
+keycode = "e"
 
 [[key]]
 name = "R"
-x = 250
-y = 110
-width = 50
-height = 50
+left = 245.0
+top = 110.0
+width = 50.0
+height = 50.0
+keycode = "r"
 
 [[key]]
 name = "T"
-x = 305
-y = 110
-width = 50
-height = 50
+left = 300.0
+top = 110.0
+width = 50.0
+height = 50.0
+keycode = "t"
 
 [[key]]
 name = "Y"
-x = 360
-y = 110
-width = 50
-height = 50
+left = 355.0
+top = 110.0
+width = 50.0
+height = 50.0
+keycode = "y"
 
 [[key]]
 name = "U"
-x = 415
-y = 110
-width = 50
-height = 50
+left = 410.0
+top = 110.0
+width = 50.0
+height = 50.0
+keycode = "u"
 
 [[key]]
 name = "I"
-x = 470
-y = 110
-width = 50
-height = 50
+left = 465.0
+top = 110.0
+width = 50.0
+height = 50.0
+keycode = "i"
 
 [[key]]
 name = "O"
-x = 525
-y = 110
-width = 50
-height = 50
+left = 520.0
+top = 110.0
+width = 50.0
+height = 50.0
+keycode = "o"
 
 [[key]]
 name = "P"
-x = 580
-y = 110
-width = 50
-height = 50
+left = 575.0
+top = 110.0
+width = 50.0
+height = 50.0
+keycode = "p"
 
 [[key]]
 name = "["
-x = 635
-y = 110
-width = 50
-height = 50
+left = 630.0
+top = 110.0
+width = 50.0
+height = 50.0
 keycode = "leftbrace"
 
 [[key]]
 name = "]"
-x = 690
-y = 110
-width = 50
-height = 50
+left = 685.0
+top = 110.0
+width = 50.0
+height = 50.0
 keycode = "rightbrace"
 
 [[key]]
 name = "\\"
-x = 745
-y = 110
-width = 70 # Often wider
-height = 50
+left = 740.0
+top = 110.0
+width = 75.0
+height = 50.0
 keycode = "backslash"
 
-# Middle Alpha Row (ASDF)
 [[key]]
 name = "Caps Lock"
-x = 47 # Adjusted from 0 (47.5 -> 47)
-y = 165
-width = 95 # Wider
-height = 50
+left = 0.0
+top = 165.0
+width = 87.5
+height = 50.0
 keycode = "capslock"
 
 [[key]]
 name = "A"
-x = 100
-y = 165
-width = 50
-height = 50
+left = 92.5
+top = 165.0
+width = 50.0
+height = 50.0
+keycode = "a"
 
 [[key]]
 name = "S"
-x = 155
-y = 165
-width = 50
-height = 50
+left = 147.5
+top = 165.0
+width = 50.0
+height = 50.0
+keycode = "s"
 
 [[key]]
 name = "D"
-x = 210
-y = 165
-width = 50
-height = 50
+left = 202.5
+top = 165.0
+width = 50.0
+height = 50.0
+keycode = "d"
 
 [[key]]
 name = "F"
-x = 265
-y = 165
-width = 50
-height = 50
+left = 257.5
+top = 165.0
+width = 50.0
+height = 50.0
+keycode = "f"
 
 [[key]]
 name = "G"
-x = 320
-y = 165
-width = 50
-height = 50
+left = 312.5
+top = 165.0
+width = 50.0
+height = 50.0
+keycode = "g"
 
 [[key]]
 name = "H"
-x = 375
-y = 165
-width = 50
-height = 50
+left = 367.5
+top = 165.0
+width = 50.0
+height = 50.0
+keycode = "h"
 
 [[key]]
 name = "J"
-x = 430
-y = 165
-width = 50
-height = 50
+left = 422.5
+top = 165.0
+width = 50.0
+height = 50.0
+keycode = "j"
 
 [[key]]
 name = "K"
-x = 485
-y = 165
-width = 50
-height = 50
+left = 477.5
+top = 165.0
+width = 50.0
+height = 50.0
+keycode = "k"
 
 [[key]]
 name = "L"
-x = 540
-y = 165
-width = 50
-height = 50
+left = 532.5
+top = 165.0
+width = 50.0
+height = 50.0
+keycode = "l"
 
 [[key]]
 name = ";"
-x = 595
-y = 165
-width = 50
-height = 50
+left = 587.5
+top = 165.0
+width = 50.0
+height = 50.0
 keycode = "semicolon"
 
 [[key]]
 name = "'"
-x = 650
-y = 165
-width = 50
-height = 50
+left = 642.5
+top = 165.0
+width = 50.0
+height = 50.0
 keycode = "apostrophe"
 
 [[key]]
 name = "Enter"
-x = 735 # Adjusted from 705
-y = 165
-width = 110 # Wider
-height = 50
-# keycode = "enter"
+left = 697.5
+top = 165.0
+width = 112.5
+height = 50.0
+keycode = "enter"
 
-# Bottom Alpha Row (ZXCV)
 [[key]]
-name = "Shift" # Was "L. Shift"
-x = 60 # Adjusted from 0
-y = 220
-width = 120 # Wider
-height = 50
+name = "Shift"
+left = 0.0
+top = 220.0
+width = 112.5
+height = 50.0
 keycode = "leftshift"
 
 [[key]]
 name = "Z"
-x = 125
-y = 220
-width = 50
-height = 50
+left = 117.5
+top = 220.0
+width = 50.0
+height = 50.0
+keycode = "z"
 
 [[key]]
 name = "X"
-x = 180
-y = 220
-width = 50
-height = 50
+left = 172.5
+top = 220.0
+width = 50.0
+height = 50.0
+keycode = "x"
 
 [[key]]
 name = "C"
-x = 235
-y = 220
-width = 50
-height = 50
+left = 227.5
+top = 220.0
+width = 50.0
+height = 50.0
+keycode = "c"
 
 [[key]]
 name = "V"
-x = 290
-y = 220
-width = 50
-height = 50
+left = 282.5
+top = 220.0
+width = 50.0
+height = 50.0
+keycode = "v"
 
 [[key]]
 name = "B"
-x = 345
-y = 220
-width = 50
-height = 50
+left = 337.5
+top = 220.0
+width = 50.0
+height = 50.0
+keycode = "b"
 
 [[key]]
 name = "N"
-x = 400
-y = 220
-width = 50
-height = 50
+left = 392.5
+top = 220.0
+width = 50.0
+height = 50.0
+keycode = "n"
 
 [[key]]
 name = "M"
-x = 455
-y = 220
-width = 50
-height = 50
+left = 447.5
+top = 220.0
+width = 50.0
+height = 50.0
+keycode = "m"
 
 [[key]]
 name = ","
-x = 510
-y = 220
-width = 50
-height = 50
+left = 502.5
+top = 220.0
+width = 50.0
+height = 50.0
 keycode = "comma"
 
 [[key]]
 name = "."
-x = 565
-y = 220
-width = 50
-height = 50
+left = 557.5
+top = 220.0
+width = 50.0
+height = 50.0
 keycode = "dot"
 
 [[key]]
 name = "/"
-x = 620
-y = 220
-width = 50
-height = 50
+left = 612.5
+top = 220.0
+width = 50.0
+height = 50.0
 keycode = "slash"
 
 [[key]]
-name = "Shift" # Was "R. Shift"
-x = 720 # Adjusted from 675
-y = 220
-width = 140 # Wider
-height = 50
+name = "Shift"
+left = 667.5
+top = 220.0
+width = 137.5
+height = 50.0
 keycode = "rightshift"
 
-# Bottom Row (Modifiers & Space)
 [[key]]
-name = "Ctrl" # Was "L. Ctrl"
-x = 35 # Adjusted from 0
-y = 275
-width = 70
-height = 50
+name = "Ctrl"
+left = 0.0
+top = 275.0
+width = 62.5
+height = 50.0
 keycode = "leftctrl"
 
 [[key]]
-name = "Super" # Was "L. Super"
-x = 105 # Adjusted from 75
-y = 275
-width = 60
-height = 50
+name = "Super"
+left = 67.5
+top = 275.0
+width = 62.5
+height = 50.0
 keycode = "leftmeta"
 
 [[key]]
-name = "Alt" # Was "L. Alt"
-x = 175 # Adjusted from 140
-y = 275
-width = 70
-height = 50
+name = "Alt"
+left = 135.0
+top = 275.0
+width = 62.5
+height = 50.0
 keycode = "leftalt"
 
 [[key]]
 name = "Space"
-x = 365 # Adjusted from 215
-y = 275
-width = 300 # Much Wider
-height = 50
-# keycode = "space"
+left = 202.5
+top = 275.0
+width = 312.5
+height = 50.0
+keycode = "space"
 
 [[key]]
-name = "Alt" # Was "R. Alt"
-x = 555 # Adjusted from 520
-y = 275
-width = 70
-height = 50
+name = "Alt"
+left = 520.0
+top = 275.0
+width = 62.5
+height = 50.0
 keycode = "rightalt"
 
 [[key]]
-name = "Super" # Was "R. Super"
-x = 625 # Adjusted from 595
-y = 275
-width = 60
-height = 50
+name = "Super"
+left = 587.5
+top = 275.0
+width = 62.5
+height = 50.0
 keycode = "rightmeta"
 
 [[key]]
 name = "Menu"
-x = 690 # Adjusted from 660
-y = 275
-width = 60
-height = 50
-# keycode = "menu"
+left = 655.0
+top = 275.0
+width = 62.5
+height = 50.0
+keycode = "menu"
 
 [[key]]
-name = "Ctrl" # Was "R. Ctrl"
-x = 770 # Adjusted from 725
-y = 275
-width = 90
-height = 50
+name = "Ctrl"
+left = 722.5
+top = 275.0
+width = 62.5
+height = 50.0
 keycode = "rightctrl"
 
-
-# Navigation Cluster
 [[key]]
-name = "PrtSc" # Print Screen / SysRq
-x = 840
-y = 0
-width = 50
-height = 50
-keycode = "sysrq" # Often maps to SYSRQ
+name = "Print Screen"
+left = 845.0
+top = 0.0
+width = 50.0
+height = 50.0
+keycode = "printscreen"
 
 [[key]]
-name = "Scroll Lock" # Was "ScrollLk"
-x = 895
-y = 0
-width = 50
-height = 50
+name = "Scroll Lock"
+left = 900.0
+top = 0.0
+width = 50.0
+height = 50.0
 keycode = "scrolllock"
 
 [[key]]
-name = "Pause" # Pause/Break
-x = 950
-y = 0
-width = 50
-height = 50
-# keycode = "pause"
+name = "Pause"
+left = 955.0
+top = 0.0
+width = 50.0
+height = 50.0
+keycode = "pause"
 
 [[key]]
-name = "Ins" # Insert
-x = 840
-y = 55
-width = 50
-height = 50
+name = "Ins"
+left = 845.0
+top = 55.0
+width = 50.0
+height = 50.0
 keycode = "insert"
 
 [[key]]
 name = "Home"
-x = 895
-y = 55
-width = 50
-height = 50
-# keycode = "home"
+left = 900.0
+top = 55.0
+width = 50.0
+height = 50.0
+keycode = "home"
 
 [[key]]
-name = "PgUp" # Page Up
-x = 950
-y = 55
-width = 50
-height = 50
+name = "PgUp"
+left = 955.0
+top = 55.0
+width = 50.0
+height = 50.0
 keycode = "pageup"
 
 [[key]]
-name = "Del" # Delete
-x = 840
-y = 110
-width = 50
-height = 50
+name = "Del"
+left = 845.0
+top = 110.0
+width = 50.0
+height = 50.0
 keycode = "delete"
 
 [[key]]
 name = "End"
-x = 895
-y = 110
-width = 50
-height = 50
-# keycode = "end"
+left = 900.0
+top = 110.0
+width = 50.0
+height = 50.0
+keycode = "end"
 
 [[key]]
-name = "PgDn" # Page Down
-x = 950
-y = 110
-width = 50
-height = 50
+name = "PgDn"
+left = 955.0
+top = 110.0
+width = 50.0
+height = 50.0
 keycode = "pagedown"
 
-# Arrow Keys
 [[key]]
 name = "Up"
-x = 895
-y = 220
-width = 50
-height = 50
+left = 900.0
+top = 220.0
+width = 50.0
+height = 50.0
 keycode = "up"
 
 [[key]]
 name = "Left"
-x = 840
-y = 275
-width = 50
-height = 50
+left = 845.0
+top = 275.0
+width = 50.0
+height = 50.0
 keycode = "left"
 
 [[key]]
 name = "Down"
-x = 895
-y = 275
-width = 50
-height = 50
+left = 900.0
+top = 275.0
+width = 50.0
+height = 50.0
 keycode = "down"
 
 [[key]]
 name = "Right"
-x = 950
-y = 275
-width = 50
-height = 50
+left = 955.0
+top = 275.0
+width = 50.0
+height = 50.0
 keycode = "right"
