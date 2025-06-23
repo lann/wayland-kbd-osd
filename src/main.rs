@@ -601,73 +601,150 @@ fn main() {
     log::info!("Initial roundtrip complete. Wayland window should be configured and drawn. Waiting for further events...");
 
     use input::event::Event as LibinputEvent;
-    use input::event::keyboard::{KeyboardEvent, KeyState, KeyboardEventTrait}; // KeyboardKeyEvent removed as it's the type of key_event
-    // std::time::Duration was removed as std::thread::sleep is no longer used.
+    use input::event::keyboard::{KeyboardEvent, KeyState, KeyboardEventTrait};
+    // use std::time::Duration; // No longer needed
+    use wayland_client::backend::WaylandError;
+    use std::os::unix::io::{AsRawFd as _, RawFd};
+    // use std::ptr; // No longer needed if pollfd is zeroed carefully or fully initialized
+    use std::io; // For io::Error
 
     log::info!("Entering main event loop.");
+
+    let wayland_raw_fd: RawFd = conn.prepare_read().unwrap().connection_fd().as_raw_fd();
+    let mut fds: Vec<libc::pollfd> = Vec::new();
+
+    fds.push(libc::pollfd {
+        fd: wayland_raw_fd,
+        events: libc::POLLIN,
+        revents: 0,
+    });
+    const WAYLAND_FD_IDX: usize = 0;
+
+    let mut libinput_fd_idx_opt: Option<usize> = None;
+    if let Some(ref context) = app_state.input_context {
+        let libinput_raw_fd: RawFd = context.as_raw_fd();
+        fds.push(libc::pollfd {
+            fd: libinput_raw_fd,
+            events: libc::POLLIN,
+            revents: 0,
+        });
+        libinput_fd_idx_opt = Some(fds.len() - 1);
+    }
+
+    // Timeout for poll in milliseconds
+    let poll_timeout_ms = 100;
+
     while app_state.running {
-        // Process Wayland events, blocks until events are available or an error occurs.
-        match event_queue.blocking_dispatch(&mut app_state) {
-            Ok(_) => { /* Events dispatched successfully */ }
-            Err(e) => {
-                log::error!("Error in blocking_dispatch: {}", e);
-                match e {
-                    wayland_client::DispatchError::Backend(err) => {
-                        match err {
-                            wayland_client::backend::WaylandError::Io(io_err) => {
-                                if io_err.kind() == std::io::ErrorKind::Interrupted {
-                                    log::warn!("Wayland dispatch interrupted (IO), continuing.");
-                                    continue; // Try dispatching again
+        // Reset revents before each poll call
+        for item in fds.iter_mut() {
+            item.revents = 0;
+        }
+        let mut needs_redraw = false; // Initialize needs_redraw at the start of the loop iteration
+
+        let ret = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, poll_timeout_ms) };
+
+        if ret < 0 {
+            let errno = io::Error::last_os_error().raw_os_error().unwrap_or(0);
+            if errno == libc::EINTR {
+                log::trace!("libc::poll interrupted, continuing.");
+                continue;
+            }
+            log::error!("libc::poll error: {}", io::Error::last_os_error());
+            app_state.running = false;
+            break;
+        } else if ret == 0 {
+            // Timeout, no events
+            log::trace!("libc::poll timeout, no events.");
+        } else {
+            // Events are ready
+
+            // Check Wayland FD
+            if (fds[WAYLAND_FD_IDX].revents & libc::POLLIN) != 0 {
+                log::trace!("Wayland FD readable (POLLIN)");
+                if let Some(guard) = conn.prepare_read() {
+                    match guard.read() {
+                        Ok(n) => {
+                            log::trace!("Successfully read {} bytes from Wayland socket (after poll)", n);
+                            // Dispatch pending Wayland events. Non-blocking.
+                            match event_queue.dispatch_pending(&mut app_state) {
+                                Ok(_) => { log::trace!("Wayland events dispatched successfully."); }
+                                Err(e) => {
+                                    log::error!("Error in dispatch_pending: {}", e);
+                                    // Handle Wayland dispatch errors similarly to before
+                                    match e {
+                                        wayland_client::DispatchError::Backend(WaylandError::Io(io_err)) => {
+                                            if io_err.kind() == std::io::ErrorKind::Interrupted {
+                                                log::warn!("Wayland dispatch_pending interrupted (IO), continuing.");
+                                            } else {
+                                                log::error!("Wayland dispatch_pending IO error: {}, exiting.", io_err);
+                                                app_state.running = false;
+                                            }
+                                        }
+                                        wayland_client::DispatchError::Backend(WaylandError::Protocol(protocol_err)) => {
+                                            log::error!("Wayland dispatch_pending protocol error: {}, exiting.", protocol_err);
+                                            app_state.running = false;
+                                        }
+                                        _ => {
+                                            log::error!("Unhandled Wayland dispatch_pending error: {}, exiting.", e);
+                                            app_state.running = false;
+                                        }
+                                    }
                                 }
-                                log::error!("Wayland dispatch IO error: {}, exiting.", io_err);
-                                app_state.running = false;
                             }
-                            wayland_client::backend::WaylandError::Protocol(protocol_err) => {
-                                log::error!("Wayland dispatch protocol error: {}, exiting.", protocol_err);
-                                app_state.running = false;
-                            }
-                            // No other variants if 'dlopen' feature is not used
+                        }
+                        Err(WaylandError::Io(io_err)) if io_err.kind() == std::io::ErrorKind::WouldBlock => {
+                            log::trace!("Wayland read would block, no new events this cycle (after poll).");
+                        }
+                        Err(WaylandError::Io(io_err)) => {
+                            log::error!("Error reading from Wayland connection (after poll): {}", io_err);
+                            app_state.running = false;
+                        }
+                        Err(e) => {
+                            log::error!("Error reading from Wayland connection (non-IO, after poll): {}", e);
+                            app_state.running = false;
                         }
                     }
-                    _ => { // Other dispatch errors like Io with no inner WaylandError, or malformed messages
-                        log::error!("Unhandled Wayland dispatch error: {}, exiting.", e);
-                        app_state.running = false;
+                } else {
+                    log::warn!("Failed to prepare_read on Wayland connection after poll.");
+                }
+            }
+            if (fds[WAYLAND_FD_IDX].revents & libc::POLLERR) != 0 || (fds[WAYLAND_FD_IDX].revents & libc::POLLHUP) != 0 {
+                 log::error!("Wayland FD error/hangup (POLLERR/POLLHUP). Exiting.");
+                 app_state.running = false;
+            }
+
+
+            // Check libinput FD
+            if let Some(libinput_idx) = libinput_fd_idx_opt {
+                if app_state.running && (fds[libinput_idx].revents & libc::POLLIN) != 0 {
+                    log::trace!("Libinput FD readable (POLLIN)");
+                    if let Some(ref mut context) = app_state.input_context {
+                        if context.dispatch().is_err() {
+                            log::error!("Libinput dispatch error in event processing loop");
+                        }
+                        while let Some(libinput_event) = context.next() {
+                            if let LibinputEvent::Keyboard(KeyboardEvent::Key(key_event)) = libinput_event {
+                                let key_code = key_event.key();
+                                let key_state = key_event.key_state();
+                                log::trace!("Key event: code {}, state {:?}", key_code, key_state);
+
+                                let pressed = key_state == KeyState::Pressed;
+                                if let Some(current_state) = app_state.key_states.get_mut(&key_code) {
+                                    if *current_state != pressed {
+                                        *current_state = pressed;
+                                        needs_redraw = true;
+                                        log::info!("Configured key {} state changed: {}", key_code, pressed);
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
         }
 
-        // If an error in dispatch caused us to stop running, or if xdg_toplevel_close was handled,
-        // break the loop early before processing input or drawing.
         if !app_state.running {
             break;
-        }
-
-        let mut needs_redraw = false;
-        if let Some(ref mut context) = app_state.input_context {
-            if context.dispatch().is_err() {
-                log::error!("Libinput dispatch error in event processing loop");
-                // Consider if this should also set app_state.running = false
-            }
-            while let Some(event) = context.next() {
-                if let LibinputEvent::Keyboard(KeyboardEvent::Key(key_event)) = event {
-                    let key_code = key_event.key();
-                    let key_state = key_event.key_state();
-                    log::trace!("Key event: code {}, state {:?}", key_code, key_state);
-
-                    let pressed = key_state == KeyState::Pressed;
-                    let mut local_needs_redraw = false;
-
-                    if let Some(current_state) = app_state.key_states.get_mut(&key_code) {
-                        if *current_state != pressed {
-                            *current_state = pressed;
-                            local_needs_redraw = true;
-                            log::info!("Configured key {} state changed: {}", key_code, pressed);
-                        }
-                    }
-                    if local_needs_redraw { needs_redraw = true; }
-                }
-            }
         }
 
         if needs_redraw {
@@ -678,26 +755,19 @@ fn main() {
             }
         }
 
-        // Flush the connection (non-blocking for the most part)
-        // Errors here could be critical.
-        if let Err(e) = conn.flush() {
-            log::error!("Failed to flush Wayland connection: {}", e);
-            match e {
-                wayland_client::backend::WaylandError::Io(io_err) => {
-                    if io_err.kind() != std::io::ErrorKind::WouldBlock {
-                        log::error!("Wayland flush IO error (not WouldBlock): {}, exiting.", io_err);
-                        app_state.running = false; // Critical error, stop running
-                    }
-                    // If it's WouldBlock, we just continue; data will be sent later.
-                    log::trace!("Wayland flush returned WouldBlock, continuing.");
-                }
-                _ => { // Includes Protocol errors or other unexpected issues
-                    log::error!("Critical Wayland flush error: {:?}, exiting.", e);
-                    app_state.running = false; // Critical error, stop running
-                }
+        match conn.flush() {
+            Ok(_) => { log::trace!("Wayland connection flushed successfully."); }
+            Err(WaylandError::Io(e)) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                log::warn!("Wayland flush would block. Messages might be delayed.");
+            }
+            Err(e) => {
+                log::error!("Failed to flush Wayland connection: {}", e);
+                app_state.running = false;
             }
         }
-        // The std::thread::sleep is removed as blocking_dispatch handles waiting.
+
+        // The main loop using libc::poll doesn't require explicit re-registration of FDs in this manner.
+        // The fds array is re-used in each call to libc::poll.
     }
     log::info!("Exiting application loop.");
 }
