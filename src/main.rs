@@ -70,8 +70,8 @@ struct OverlayConfig {
     background_color_inactive: String,
     #[serde(default = "default_background_color_active")]
     background_color_active: String, // Note: "active" here refers to the window, not key press
-                                     // For now, only inactive is used for the general overlay background.
-                                     // "active" could be used if the overlay itself had focus states.
+    #[serde(default = "default_global_key_background_color_string")]
+    default_key_background_color: String,
 }
 
 fn default_overlay_position() -> OverlayPosition {
@@ -83,11 +83,17 @@ fn default_overlay_margin() -> i32 {
 }
 
 fn default_background_color_inactive() -> String {
-    "#00000080".to_string() // Translucent black
+    "#00000000".to_string() // Fully transparent
 }
 
 fn default_background_color_active() -> String {
     "#A0A0A0D0".to_string() // Slightly more opaque grey (currently unused for global background)
+}
+
+// Renamed to avoid confusion with the field name if it were Option<String>
+// Since it's String, the default function must return String.
+fn default_global_key_background_color_string() -> String {
+    "#E0E0E080".to_string() // Translucent light grey
 }
 
 impl Default for OverlayConfig {
@@ -103,6 +109,7 @@ impl Default for OverlayConfig {
             margin_left: default_overlay_margin(),
             background_color_inactive: default_background_color_inactive(),
             background_color_active: default_background_color_active(),
+            default_key_background_color: default_global_key_background_color_string(),
         }
     }
 }
@@ -122,10 +129,10 @@ struct KeyConfig {
     text_size: Option<f32>,       // Optional, defaults to a global default
     corner_radius: Option<f32>,   // Optional
     border_thickness: Option<f32>,// Optional
+    background_color: Option<String>, // Optional per-key background color
     // Colors could also be strings like "#RRGGBBAA" and parsed later
     // For now, keeping them simple, assuming they might be added if needed
     // border_color_hex: Option<String>,
-    // background_color_hex: Option<String>,
     // text_color_hex: Option<String>,
 }
 
@@ -709,7 +716,7 @@ impl AppState {
 
         // Default colors for Cairo: (R, G, B, A) with values from 0.0 to 1.0
         let border_c_cairo = (0x80 as f64 / 255.0, 0x80 as f64 / 255.0, 0x80 as f64 / 255.0, 0xFF as f64 / 255.0);
-        let background_c_default_cairo = (0xE0 as f64 / 255.0, 0xE0 as f64 / 255.0, 0xE0 as f64 / 255.0, 0xFF as f64 / 255.0);
+        // let background_c_default_cairo = (0xE0 as f64 / 255.0, 0xE0 as f64 / 255.0, 0xE0 as f64 / 255.0, 0xFF as f64 / 255.0); // No longer used directly
         let background_c_pressed_cairo = (0xA0 as f64 / 255.0, 0xA0 as f64 / 255.0, 0xF0 as f64 / 255.0, 0xFF as f64 / 255.0);
         let text_c_cairo = (0x10 as f64 / 255.0, 0x10 as f64 / 255.0, 0x10 as f64 / 255.0, 0xFF as f64 / 255.0);
 
@@ -718,7 +725,48 @@ impl AppState {
 
         for key_config in &self.config.key {
             let is_pressed = *self.key_states.get(&key_config.keycode).unwrap_or(&false);
-            let background_color = if is_pressed { background_c_pressed_cairo } else { background_c_default_cairo };
+
+            // Define the ultimate fallback color tuple once, from the default string.
+            // This ensures the hardcoded fallback is indeed the intended translucent one.
+            let ultimate_fallback_color_tuple = parse_color_string(&default_global_key_background_color_string())
+                .unwrap_or_else(|_| (0.878, 0.878, 0.878, 0.5)); // #E0E0E080 as tuple, should not fail
+
+            let current_bg_color_tuple = if is_pressed {
+                background_c_pressed_cairo // This is already a parsed (r,g,b,a) tuple
+            } else {
+                // Determine inactive background color based on priority
+                // 1. Per-key config
+                // 2. Global overlay config
+                // 3. Hardcoded ultimate fallback (derived from default_global_key_background_color_string)
+                let color_to_use = key_config.background_color.as_ref()
+                    .map(|per_key_color_str| {
+                        parse_color_string(per_key_color_str).unwrap_or_else(|e| {
+                            log::error!(
+                                "Failed to parse per-key background_color string '{}' for key '{}': {}. Using global/hardcoded default.",
+                                per_key_color_str, key_config.name, e
+                            );
+                            // Fallback to global default string for parsing
+                            parse_color_string(&self.config.overlay.default_key_background_color).unwrap_or_else(|e_global| {
+                                log::error!(
+                                    "Failed to parse global default_key_background_color string '{}': {}. Using hardcoded ultimate fallback.",
+                                    &self.config.overlay.default_key_background_color, e_global
+                                );
+                                ultimate_fallback_color_tuple
+                            })
+                        })
+                    })
+                    .unwrap_or_else(|| {
+                        // No per-key color, so use global default string for parsing
+                        parse_color_string(&self.config.overlay.default_key_background_color).unwrap_or_else(|e_global| {
+                            log::error!(
+                                "Failed to parse global default_key_background_color string '{}': {}. Using hardcoded ultimate fallback.",
+                                &self.config.overlay.default_key_background_color, e_global
+                            );
+                            ultimate_fallback_color_tuple
+                        })
+                    });
+                color_to_use
+            };
 
             // Apply scaling and offset
             // key_config.left and .top are top-left coordinates.
@@ -745,7 +793,7 @@ impl AppState {
                 rotation_degrees: final_rotation, // Rotation is absolute
                 text_size: final_text_size,
                 border_color: border_c_cairo,
-                background_color, // This is already background_c_pressed_cairo or background_c_default_cairo
+                background_color: current_bg_color_tuple,
                 text_color: text_c_cairo,
             };
             keys_to_draw.push(key_display);
@@ -1125,6 +1173,10 @@ fn print_overlay_config_for_check(config: &OverlayConfig) {
     match parse_color_string(&config.background_color_active) {
         Ok((r,g,b,a)) => println!("  Background Active:    {} (R:{:.2} G:{:.2} B:{:.2} A:{:.2}) (currently unused for global bg)", config.background_color_active, r,g,b,a),
         Err(e) => println!("  Background Active:    {} (Error: {})", config.background_color_active, e),
+    }
+    match parse_color_string(&config.default_key_background_color) {
+        Ok((r,g,b,a)) => println!("  Default Key BG:       {} (R:{:.2} G:{:.2} B:{:.2} A:{:.2})", config.default_key_background_color, r,g,b,a),
+        Err(e) => println!("  Default Key BG:       {} (Error: {})", config.default_key_background_color, e),
     }
 }
 
@@ -1548,7 +1600,8 @@ fn main() {
                         screen_height_px = info.logical_height;
                         log::info!("Using selected screen dimensions for size calculation: {}x{}", screen_width_px, screen_height_px);
                     } else {
-                        log::warn!("Selected screen {:?} has no logical dimensions yet. Falling back to default {}x{} for size calculation.", info.name, screen_width_px, screen_height_px);
+                        // This warning implies the waiting loop timed out or failed for the selected screen.
+                        log::warn!("Selected screen {:?} still has no logical dimensions after wait loop. Falling back to default {}x{} for size calculation.", info.name.as_deref().unwrap_or("N/A"), screen_width_px, screen_height_px);
                     }
                 }
             } else if let Some((_, _, _, info)) = app_state.outputs.first() { // Default to first output if none selected
@@ -1557,10 +1610,11 @@ fn main() {
                     screen_height_px = info.logical_height;
                     log::info!("Using first available screen dimensions for size calculation: {}x{}", screen_width_px, screen_height_px);
                 } else {
-                     log::warn!("First available screen {:?} has no logical dimensions yet. Falling back to default {}x{} for size calculation.", info.name, screen_width_px, screen_height_px);
+                     // This warning implies the waiting loop timed out or failed for the first available screen.
+                     log::warn!("First available screen {:?} still has no logical dimensions after wait loop. Falling back to default {}x{} for size calculation.", info.name.as_deref().unwrap_or("N/A"), screen_width_px, screen_height_px);
                 }
             } else {
-                log::warn!("No screens found/selected. Using default window size {}x{} for overlay size calculation.", screen_width_px, screen_height_px);
+                log::warn!("No screens found/selected (even after wait loop). Using default window size {}x{} for overlay size calculation.", screen_width_px, screen_height_px);
             }
 
             let (layout_bound_w, layout_bound_h) = app_state.get_key_layout_bounds();
@@ -1675,10 +1729,77 @@ fn main() {
         log::error!("Error during roundtrip after surface commit (waiting for initial configure).");
         // Depending on the error, might want to exit or handle differently
     }
+
+    // If in overlay mode, wait for screen dimensions to be populated
+    if cli.overlay && app_state.layer_shell.is_some() {
+        log::info!("Waiting for screen dimensions to be populated for overlay mode...");
+        let mut dimensions_populated = false;
+        // Max attempts to prevent infinite loop. ~100 iterations.
+        // With typical event dispatch, this should be very quick if events are pending,
+        // or rely on the poll timeout in the main loop if no events arrive.
+        // No explicit sleep here unless found necessary.
+        for attempt in 0..100 {
+            let mut target_output_info: Option<&OutputInfo> = None;
+
+            if let Some(target_screen_specifier) = app_state.config.overlay.screen.as_ref() {
+                // Try to parse as index first
+                if let Ok(target_idx) = target_screen_specifier.parse::<usize>() {
+                    if let Some((_, _, _, info)) = app_state.outputs.get(target_idx) {
+                        target_output_info = Some(info);
+                    }
+                } else {
+                    // Try to match by name or description
+                    for (_, _, _, info) in &app_state.outputs {
+                        if info.name.as_deref() == Some(target_screen_specifier) || info.description.as_deref() == Some(target_screen_specifier) {
+                            target_output_info = Some(info);
+                            break;
+                        }
+                    }
+                }
+            } else {
+                // If no screen is specified, default to the first one
+                if let Some((_, _, _, info)) = app_state.outputs.first() {
+                    target_output_info = Some(info);
+                }
+            }
+
+            if let Some(info) = target_output_info {
+                if info.logical_width > 0 && info.logical_height > 0 {
+                    log::info!("Screen dimensions populated for {:?}: {}x{}",
+                               info.name.as_deref().unwrap_or("N/A"), info.logical_width, info.logical_height);
+                    dimensions_populated = true;
+                    break;
+                }
+            }
+
+            // Dispatch pending events
+            // Need to handle potential errors from dispatch_pending more gracefully if it can fail often.
+            if event_queue.dispatch_pending(&mut app_state).is_err() {
+                 log::error!("Error dispatching events while waiting for screen dimensions.");
+                 // Potentially break or handle error, for now log and continue trying for a bit
+            }
+            // A small sleep might be useful if dispatch_pending is too fast and burns CPU,
+            // but typically event dispatch should block or be efficient.
+            // std::thread::sleep(std::time::Duration::from_millis(10)); // Optional: if CPU usage is high
+            if conn.flush().is_err() {
+                log::error!("Error flushing connection while waiting for screen dimensions.");
+                // Potentially break
+            }
+            if attempt % 20 == 0 && attempt > 0 { // Log progress occasionally
+                log::debug!("Still waiting for screen dimensions... (attempt {})", attempt + 1);
+            }
+        }
+
+        if !dimensions_populated {
+            log::warn!("Timed out waiting for screen dimensions. Overlay positioning/sizing might use defaults or be incorrect.");
+        }
+    }
+
+
     // An explicit draw call here might be needed if the first configure doesn't trigger it,
     // or if we want to show something before the first configure.
     // However, the xdg_surface configure event should trigger the first draw.
-    log::info!("Initial roundtrip complete. Wayland window should be configured. Waiting for events...");
+    log::info!("Initial roundtrip and dimension wait complete. Wayland window should be configured. Waiting for events...");
 
     // Imports for LibinputEvent, KeyboardEvent, KeyState, KeyboardEventTrait, WaylandError
     // are now at the top of the module.
