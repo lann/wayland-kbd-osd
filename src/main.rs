@@ -256,15 +256,21 @@ struct AppState {
     configured_height: i32,
     running: bool, // Added to control the main loop
     input_context: Option<input::Libinput>,
-    // left_ctrl_pressed: bool, // Replaced by key_states
-    // left_alt_pressed: bool,  // Replaced by key_states
     config: AppConfig,               // Store loaded configuration
     key_states: HashMap<u32, bool>,  // Stores pressed state for each configured keycode
-    // key_config_map: HashMap<u32, KeyConfig>, // For quick lookup - might be better to build this once in new()
+    needs_redraw: bool, // Added to manage redraw logic globally
+
+    // Cache for layout calculations
+    last_draw_width: i32,
+    last_draw_height: i32,
+    cached_scale: f32,
+    cached_offset_x: f32,
+    cached_offset_y: f32,
+    layout_cache_valid: bool,
 }
 
 impl AppState {
-    fn new(app_config: AppConfig) -> Self { // Renamed to avoid conflict
+    fn new(app_config: AppConfig) -> Self {
         let mut key_states_map = HashMap::new();
         for key_conf in app_config.key.iter() {
             key_states_map.insert(key_conf.keycode, false);
@@ -277,13 +283,21 @@ impl AppState {
             surface: None,
             buffer: None,
             mmap: None,
-            temp_file: None, // Initialize temp_file
+            temp_file: None,
             configured_width: WINDOW_WIDTH,
             configured_height: WINDOW_HEIGHT,
-            running: true, // Initialize to true
+            running: true,
             input_context: None,
-            config: app_config, // Use the passed app_config
-            key_states: key_states_map, // Use the initialized map
+            config: app_config,
+            key_states: key_states_map,
+            needs_redraw: true, // Start with true to ensure initial draw
+
+            last_draw_width: 0,
+            last_draw_height: 0,
+            cached_scale: 1.0,
+            cached_offset_x: 0.0,
+            cached_offset_y: 0.0,
+            layout_cache_valid: false,
         }
     }
 
@@ -377,16 +391,23 @@ impl AppState {
             surface.damage_buffer(0, 0, width, height);
             surface.commit();
             self.buffer = Some(buffer);
-            // self.mmap = Some(mmap); // This line caused the error and is not needed here.
             return;
+        }
+
+        // Check if layout parameters can be reused from cache
+        if self.layout_cache_valid && self.configured_width == self.last_draw_width && self.configured_height == self.last_draw_height {
+            scale = self.cached_scale;
+            offset_x = self.cached_offset_x;
+            offset_y = self.cached_offset_y;
+            log::trace!("Using cached layout parameters: scale={}, offset_x={}, offset_y={}", scale, offset_x, offset_y);
         } else {
+            log::trace!("Recalculating layout parameters. Cache invalid or dimensions changed.");
             let mut min_coord_x = f32::MAX;
             let mut max_coord_x = f32::MIN;
             let mut min_coord_y = f32::MAX;
             let mut max_coord_y = f32::MIN;
 
             for key_config in &self.config.key {
-                // key_config.left and .top are TOP-LEFT coordinates from TOML
                 min_coord_x = min_coord_x.min(key_config.left);
                 max_coord_x = max_coord_x.max(key_config.left + key_config.width);
                 min_coord_y = min_coord_y.min(key_config.top);
@@ -396,18 +417,27 @@ impl AppState {
             let layout_width = max_coord_x - min_coord_x;
             let layout_height = max_coord_y - min_coord_y;
 
-            let padding = (width.min(height) as f32 * 0.05).max(5.0); // 5% padding, min 5px
+            let padding = (width.min(height) as f32 * 0.05).max(5.0);
             let drawable_width = width as f32 - 2.0 * padding;
             let drawable_height = height as f32 - 2.0 * padding;
 
             let current_scale_x = if layout_width > 0.0 { drawable_width / layout_width } else { 1.0 };
             let current_scale_y = if layout_height > 0.0 { drawable_height / layout_height } else { 1.0 };
-            scale = current_scale_x.min(current_scale_y).max(0.01); // Preserve aspect ratio, ensure scale is positive
+            scale = current_scale_x.min(current_scale_y).max(0.01);
 
             let scaled_layout_width = layout_width * scale;
             let scaled_layout_height = layout_height * scale;
             offset_x = padding + (drawable_width - scaled_layout_width) / 2.0 - (min_coord_x * scale);
             offset_y = padding + (drawable_height - scaled_layout_height) / 2.0 - (min_coord_y * scale);
+
+            // Update cache
+            self.cached_scale = scale;
+            self.cached_offset_x = offset_x;
+            self.cached_offset_y = offset_y;
+            self.last_draw_width = self.configured_width;
+            self.last_draw_height = self.configured_height;
+            self.layout_cache_valid = true;
+            log::trace!("Updated layout cache: scale={}, offset_x={}, offset_y={}", scale, offset_x, offset_y);
         }
 
         let font_data: &[u8] = include_bytes!("../default-font/DejaVuSansMono.ttf");
@@ -529,7 +559,11 @@ impl Dispatch<xdg_surface::XdgSurface, ()> for AppState {
     fn event( state: &mut AppState, surface_proxy: &xdg_surface::XdgSurface, event: xdg_surface::Event, _data: &(), _conn: &Connection, qh: &QueueHandle<AppState>) {
         if let xdg_surface::Event::Configure { serial, .. } = event {
             surface_proxy.ack_configure(serial);
-            if state.surface.is_some() { state.draw(qh); }
+            if state.surface.is_some() {
+                log::debug!("XDG Surface Configure event: triggering draw and setting needs_redraw to false.");
+                state.draw(qh);
+                state.needs_redraw = false; // The configure event's draw handles the current need.
+            }
         }
     }
 }
@@ -1642,11 +1676,11 @@ fn main() {
     }
 
 
-    let poll_timeout_ms = 100; // Timeout for poll in milliseconds
+    let poll_timeout_ms = 33; // Timeout for poll in milliseconds (previously 100)
 
     while app_state.running {
         for item in fds.iter_mut() { item.revents = 0; }
-        let mut needs_redraw = false;
+        // `needs_redraw` is now part of `app_state` and is managed across iterations/event types.
 
         let ret = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, poll_timeout_ms) };
 
@@ -1694,7 +1728,7 @@ fn main() {
                                 if let Some(current_state) = app_state.key_states.get_mut(&key_code) {
                                     if *current_state != pressed {
                                         *current_state = pressed;
-                                        needs_redraw = true;
+                                        app_state.needs_redraw = true; // Use AppState's field
                                         log::debug!("Key {} state changed to: {}", key_code, pressed);
                                     }
                                 }
@@ -1704,26 +1738,30 @@ fn main() {
                 }
                  if app_state.running && (fds[libinput_idx].revents & (libc::POLLERR | libc::POLLHUP)) != 0 {
                     log::error!("Libinput FD error/hangup (POLLERR/POLLHUP). Input monitoring might stop.");
-                    // Optionally remove libinput_fd from poll list or handle context recreation
                     if let Some(ref mut context) = app_state.input_context {
-                        // Attempt to dispatch any remaining events.
                         let _ = context.dispatch();
                     }
-                    app_state.input_context = None; // Stop trying to use it.
-                    if fds.len() > libinput_idx { // Ensure index is valid before removing
+                    app_state.input_context = None;
+                    if fds.len() > libinput_idx {
                         fds.remove(libinput_idx);
                     }
-                    libinput_fd_idx_opt = None; // Clear the index.
+                    libinput_fd_idx_opt = None;
                     log::warn!("Libinput context removed due to FD error. Key press/release events will no longer be monitored.");
-
                 }
             }
         }
 
         if !app_state.running { break; }
 
-        if needs_redraw {
-            if app_state.surface.is_some() { app_state.draw(&qh); }
+        if app_state.needs_redraw {
+            if app_state.surface.is_some() {
+                log::debug!("Main loop: needs_redraw is true, calling draw.");
+                app_state.draw(&qh);
+                app_state.needs_redraw = false; // Reset after drawing
+            } else {
+                log::warn!("Main loop: needs_redraw is true, but surface is None. Skipping draw.");
+                app_state.needs_redraw = false; // Still reset to prevent loop if surface never appears
+            }
         }
 
         match conn.flush() {
