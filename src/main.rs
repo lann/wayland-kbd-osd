@@ -1,6 +1,7 @@
 use wayland_client::{Connection, Dispatch, QueueHandle, Proxy};
-use wayland_client::protocol::{wl_compositor, wl_shm, wl_shm_pool, wl_surface, wl_buffer, wl_registry};
+use wayland_client::protocol::{wl_compositor, wl_shm, wl_shm_pool, wl_surface, wl_buffer, wl_registry, wl_output};
 use wayland_protocols::xdg::shell::client::{xdg_surface, xdg_toplevel, xdg_wm_base};
+use wayland_protocols::xdg::xdg_output::zv1::client::{zxdg_output_manager_v1, zxdg_output_v1};
 use input; // Added for libinput
 
 use std::collections::HashMap; // For storing key states and configs by keycode
@@ -21,6 +22,91 @@ use cairo::{Context, ImageSurface, Format, FontFace as CairoFontFace};
 use freetype::{Library as FreeTypeLibrary};
 
 // Configuration Structs
+
+// Represents a size that can be absolute (pixels) or relative (ratio of screen)
+#[derive(Deserialize, Debug, Clone, Copy)]
+#[serde(untagged)] // Allows parsing "100" as pixels(100) or "0.5" as ratio(0.5)
+enum SizeDimension {
+    Pixels(u32),
+    Ratio(f32),
+}
+
+// Enum for specifying overlay position
+#[derive(Deserialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "kebab-case")]
+enum OverlayPosition {
+    Top,
+    Bottom,
+    Left,
+    Right,
+    Center,
+    TopLeft,
+    TopCenter,
+    TopRight,
+    BottomLeft,
+    BottomCenter,
+    BottomRight,
+    CenterLeft,
+    CenterRight,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+struct OverlayConfig {
+    #[serde(default)]
+    screen: Option<String>, // Monitor name or index (string for now, parse later)
+    #[serde(default = "default_overlay_position")]
+    position: OverlayPosition,
+    size_width: Option<SizeDimension>,
+    size_height: Option<SizeDimension>,
+    #[serde(default = "default_overlay_margin")]
+    margin_top: i32,
+    #[serde(default = "default_overlay_margin")]
+    margin_right: i32,
+    #[serde(default = "default_overlay_margin")]
+    margin_bottom: i32,
+    #[serde(default = "default_overlay_margin")]
+    margin_left: i32,
+    #[serde(default = "default_background_color_inactive")]
+    background_color_inactive: String,
+    #[serde(default = "default_background_color_active")]
+    background_color_active: String, // Note: "active" here refers to the window, not key press
+                                     // For now, only inactive is used for the general overlay background.
+                                     // "active" could be used if the overlay itself had focus states.
+}
+
+fn default_overlay_position() -> OverlayPosition {
+    OverlayPosition::BottomCenter
+}
+
+fn default_overlay_margin() -> i32 {
+    0
+}
+
+fn default_background_color_inactive() -> String {
+    "#00000080".to_string() // Translucent black
+}
+
+fn default_background_color_active() -> String {
+    "#A0A0A0D0".to_string() // Slightly more opaque grey (currently unused for global background)
+}
+
+impl Default for OverlayConfig {
+    fn default() -> Self {
+        OverlayConfig {
+            screen: None,
+            position: default_overlay_position(),
+            size_width: None, // No default width, derive from height or layout
+            size_height: Some(SizeDimension::Ratio(0.3)), // Default to 30% screen height
+            margin_top: default_overlay_margin(),
+            margin_right: default_overlay_margin(),
+            margin_bottom: default_overlay_margin(),
+            margin_left: default_overlay_margin(),
+            background_color_inactive: default_background_color_inactive(),
+            background_color_active: default_background_color_active(),
+        }
+    }
+}
+
 #[derive(Deserialize, Debug, Clone)]
 struct KeyConfig {
     name: String,
@@ -45,10 +131,52 @@ struct KeyConfig {
 
 #[derive(Deserialize, Debug, Clone)]
 struct AppConfig {
+    #[serde(default)]
     key: Vec<KeyConfig>,
-    // Potentially global settings here, like default font, colors, etc.
-    // default_text_size: Option<f32>,
-    // default_corner_radius: Option<f32>,
+    #[serde(default)]
+    overlay: OverlayConfig, // Add the new overlay configuration
+}
+
+// Helper function to parse color string like "#RRGGBBAA" or "#RGB"
+// Returns (r, g, b, a) tuple with values from 0.0 to 1.0
+fn parse_color_string(color_str: &str) -> Result<(f64, f64, f64, f64), String> {
+    let s = color_str.trim_start_matches('#');
+    match s.len() {
+        6 => { // RRGGBB
+            let r = u8::from_str_radix(&s[0..2], 16).map_err(|e| format!("Invalid hex for R: {}", e))?;
+            let g = u8::from_str_radix(&s[2..4], 16).map_err(|e| format!("Invalid hex for G: {}", e))?;
+            let b = u8::from_str_radix(&s[4..6], 16).map_err(|e| format!("Invalid hex for B: {}", e))?;
+            Ok((r as f64 / 255.0, g as f64 / 255.0, b as f64 / 255.0, 1.0)) // Default alpha to 1.0
+        }
+        8 => { // RRGGBBAA
+            let r = u8::from_str_radix(&s[0..2], 16).map_err(|e| format!("Invalid hex for R: {}", e))?;
+            let g = u8::from_str_radix(&s[2..4], 16).map_err(|e| format!("Invalid hex for G: {}", e))?;
+            let b = u8::from_str_radix(&s[4..6], 16).map_err(|e| format!("Invalid hex for B: {}", e))?;
+            let a = u8::from_str_radix(&s[6..8], 16).map_err(|e| format!("Invalid hex for A: {}", e))?;
+            Ok((r as f64 / 255.0, g as f64 / 255.0, b as f64 / 255.0, a as f64 / 255.0))
+        }
+        3 => { // RGB
+            let r_char = s.chars().nth(0).unwrap();
+            let g_char = s.chars().nth(1).unwrap();
+            let b_char = s.chars().nth(2).unwrap();
+            let r = u8::from_str_radix(&format!("{}{}", r_char, r_char), 16).map_err(|e| format!("Invalid hex for R: {}", e))?;
+            let g = u8::from_str_radix(&format!("{}{}", g_char, g_char), 16).map_err(|e| format!("Invalid hex for G: {}", e))?;
+            let b = u8::from_str_radix(&format!("{}{}", b_char, b_char), 16).map_err(|e| format!("Invalid hex for B: {}", e))?;
+            Ok((r as f64 / 255.0, g as f64 / 255.0, b as f64 / 255.0, 1.0))
+        }
+        4 => { // RGBA
+            let r_char = s.chars().nth(0).unwrap();
+            let g_char = s.chars().nth(1).unwrap();
+            let b_char = s.chars().nth(2).unwrap();
+            let a_char = s.chars().nth(3).unwrap();
+            let r = u8::from_str_radix(&format!("{}{}", r_char, r_char), 16).map_err(|e| format!("Invalid hex for R: {}", e))?;
+            let g = u8::from_str_radix(&format!("{}{}", g_char, g_char), 16).map_err(|e| format!("Invalid hex for G: {}", e))?;
+            let b = u8::from_str_radix(&format!("{}{}", b_char, b_char), 16).map_err(|e| format!("Invalid hex for B: {}", e))?;
+            let a = u8::from_str_radix(&format!("{}{}", a_char, a_char), 16).map_err(|e| format!("Invalid hex for A: {}", e))?;
+            Ok((r as f64 / 255.0, g as f64 / 255.0, b as f64 / 255.0, a as f64 / 255.0))
+        }
+        _ => Err(format!("Invalid color string length for '{}'. Expected #RRGGBB, #RRGGBBAA, #RGB, or #RGBA", color_str)),
+    }
 }
 
 // Struct to hold key properties for drawing
@@ -259,6 +387,17 @@ impl input::LibinputInterface for MyLibinputInterface {
     }
 }
 
+// Struct to hold output information
+#[derive(Debug, Clone, Default)]
+struct OutputInfo {
+    name: Option<String>,
+    description: Option<String>,
+    logical_width: i32,
+    logical_height: i32,
+    // Add other fields like scale factor if needed later
+}
+
+
 // Dispatcher for zwlr_layer_surface_v1
 impl Dispatch<zwlr_layer_surface_v1::ZwlrLayerSurfaceV1, ()> for AppState {
     fn event(
@@ -306,9 +445,11 @@ struct AppState {
     compositor: Option<wl_compositor::WlCompositor>,
     shm: Option<wl_shm::WlShm>,
     xdg_wm_base: Option<xdg_wm_base::XdgWmBase>,
-    layer_shell: Option<zwlr_layer_shell_v1::ZwlrLayerShellV1>, // Added for overlay mode
+    layer_shell: Option<zwlr_layer_shell_v1::ZwlrLayerShellV1>,
+    xdg_output_manager: Option<zxdg_output_manager_v1::ZxdgOutputManagerV1>,
+    outputs: Vec<(u32, wl_output::WlOutput, Option<zxdg_output_v1::ZxdgOutputV1>, OutputInfo)>, // Store (name, output_obj, xdg_output_obj, info)
     surface: Option<wl_surface::WlSurface>,
-    layer_surface: Option<zwlr_layer_surface_v1::ZwlrLayerSurfaceV1>, // Added for overlay mode
+    layer_surface: Option<zwlr_layer_surface_v1::ZwlrLayerSurfaceV1>,
     buffer: Option<wl_buffer::WlBuffer>,
     mmap: Option<MmapMut>,
     temp_file: Option<std::fs::File>, // Added for persistent temp file
@@ -340,9 +481,11 @@ impl AppState {
             compositor: None,
             shm: None,
             xdg_wm_base: None,
-            layer_shell: None, // Initialize new field
+            layer_shell: None,
+            xdg_output_manager: None,
+            outputs: Vec::new(),
             surface: None,
-            layer_surface: None, // Initialize new field
+            layer_surface: None,
             buffer: None,
             mmap: None,
             temp_file: None,
@@ -361,6 +504,31 @@ impl AppState {
             cached_offset_y: 0.0,
             layout_cache_valid: false,
         }
+    }
+
+    // Calculates the bounding box of the raw key layout from the config.
+    // Returns (width, height) of the layout in abstract units.
+    // Returns (0.0, 0.0) if no keys are configured.
+    fn get_key_layout_bounds(&self) -> (f32, f32) {
+        if self.config.key.is_empty() {
+            return (0.0, 0.0);
+        }
+
+        let mut min_coord_x = f32::MAX;
+        let mut max_coord_x = f32::MIN;
+        let mut min_coord_y = f32::MAX;
+        let mut max_coord_y = f32::MIN;
+
+        for key_config in &self.config.key {
+            min_coord_x = min_coord_x.min(key_config.left);
+            max_coord_x = max_coord_x.max(key_config.left + key_config.width);
+            min_coord_y = min_coord_y.min(key_config.top);
+            max_coord_y = max_coord_y.max(key_config.top + key_config.height);
+        }
+
+        let layout_width = max_coord_x - min_coord_x;
+        let layout_height = max_coord_y - min_coord_y;
+        (layout_width.max(0.0), layout_height.max(0.0))
     }
 
     fn draw(&mut self, qh: &QueueHandle<AppState>) {
@@ -436,12 +604,26 @@ impl AppState {
 
         let ctx = Context::new(&cairo_surface).expect("Failed to create Cairo Context");
 
-        // Clear the surface (transparent black)
-        ctx.save().unwrap(); // Save context state before changing operator
-        ctx.set_source_rgba(0.0, 0.0, 0.0, 0.0); // Transparent
-        ctx.set_operator(cairo::Operator::Source); // Replace content
-        ctx.paint().expect("Cairo paint (clear) failed");
-        ctx.restore().unwrap(); // Restore operator and other states
+        // Clear the surface with configured background color
+        let bg_color_str = &self.config.overlay.background_color_inactive;
+        match parse_color_string(bg_color_str) {
+            Ok((r, g, b, a)) => {
+                ctx.save().unwrap();
+                ctx.set_source_rgba(r, g, b, a);
+                ctx.set_operator(cairo::Operator::Source); // Replace content
+                ctx.paint().expect("Cairo paint (clear) failed");
+                ctx.restore().unwrap();
+            }
+            Err(e) => {
+                log::error!("Failed to parse background_color_inactive '{}': {}. Using default transparent.", bg_color_str, e);
+                // Fallback to default transparent clear if parsing fails
+                ctx.save().unwrap();
+                ctx.set_source_rgba(0.0, 0.0, 0.0, 0.0);
+                ctx.set_operator(cairo::Operator::Source);
+                ctx.paint().expect("Cairo paint (clear fallback) failed");
+                ctx.restore().unwrap();
+            }
+        }
 
         let scale: f32;
         let offset_x: f32;
@@ -479,9 +661,16 @@ impl AppState {
             let layout_width = max_coord_x - min_coord_x;
             let layout_height = max_coord_y - min_coord_y;
 
-            let padding = (width.min(height) as f32 * 0.05).max(5.0);
-            let drawable_width = width as f32 - 2.0 * padding;
-            let drawable_height = height as f32 - 2.0 * padding;
+            // Adjust padding: minimal if overlay size is configured, else dynamic.
+            let padding = if self.config.overlay.size_width.is_some() || self.config.overlay.size_height.is_some() {
+                2.0 // Minimal padding when size is explicitly configured
+            } else {
+                (width.min(height) as f32 * 0.05).max(5.0) // Original dynamic padding
+            };
+            log::trace!("Using padding: {}", padding);
+
+            let drawable_width = (width as f32 - 2.0 * padding).max(0.0); // Ensure non-negative
+            let drawable_height = (height as f32 - 2.0 * padding).max(0.0); // Ensure non-negative
 
             let current_scale_x = if layout_width > 0.0 { drawable_width / layout_width } else { 1.0 };
             let current_scale_y = if layout_height > 0.0 { drawable_height / layout_height } else { 1.0 };
@@ -657,10 +846,28 @@ impl Dispatch<wl_registry::WlRegistry, ()> for AppState {
                 "wl_shm" => { state.shm = Some(registry.bind::<wl_shm::WlShm, (), AppState>(name, std::cmp::min(version,1), qh, ())); }
                 "xdg_wm_base" => { state.xdg_wm_base = Some(registry.bind::<xdg_wm_base::XdgWmBase, (), AppState>(name, std::cmp::min(version,3), qh, ())); }
                 "zwlr_layer_shell_v1" => {
-                    // Layer shell is optional, so we check its version. Version 4 is the latest for the XML I reviewed.
-                    // The wayland-protocols crate for 0.31.x seems to generate bindings against version 4.
                     state.layer_shell = Some(registry.bind::<zwlr_layer_shell_v1::ZwlrLayerShellV1, (), AppState>(name, std::cmp::min(version,4), qh, ()));
                     log::info!("Bound zwlr_layer_shell_v1 version {}", std::cmp::min(version,4));
+                }
+                "zxdg_output_manager_v1" => {
+                    // xdg-output-manager is version 3 in wayland-protocols 0.30
+                    state.xdg_output_manager = Some(registry.bind::<zxdg_output_manager_v1::ZxdgOutputManagerV1, (), AppState>(name, std::cmp::min(version,3), qh, ()));
+                    log::info!("Bound zxdg_output_manager_v1 version {}", std::cmp::min(version,3));
+                }
+                "wl_output" => {
+                    let output_obj = registry.bind::<wl_output::WlOutput, _, _>(name, std::cmp::min(version, 4), qh, ()); // Version 4 is current max for wl_output
+                    log::info!("Bound wl_output (id: {}) version {}", output_obj.id(), std::cmp::min(version, 4));
+
+                    let xdg_output_obj_opt = if let Some(manager) = state.xdg_output_manager.as_ref() {
+                        // xdg-output is version 3
+                        let xdg_output = manager.get_xdg_output(&output_obj, qh, ());
+                        log::info!("Created zxdg_output_v1 (id: {}) for wl_output (id: {})", xdg_output.id(), output_obj.id());
+                        Some(xdg_output)
+                    } else {
+                        log::warn!("zxdg_output_manager_v1 not available when wl_output was bound. Cannot get zxdg_output_v1.");
+                        None
+                    };
+                    state.outputs.push((name, output_obj, xdg_output_obj_opt, OutputInfo::default()));
                 }
                 _ => {
                     log::trace!("Ignoring unknown global: {} version {}", interface, version);
@@ -668,7 +875,108 @@ impl Dispatch<wl_registry::WlRegistry, ()> for AppState {
             }
         } else if let wl_registry::Event::GlobalRemove { name } = event {
             log::info!("Global removed: ID {}", name);
-            // TODO: Consider if we need to None-out globals if they are removed, e.g. layer_shell
+            state.outputs.retain(|(output_name, _, _, _)| *output_name != name);
+            // TODO: Consider if we need to None-out other globals if they are removed, e.g. layer_shell
+        }
+    }
+}
+
+// Dispatcher for wl_output
+impl Dispatch<wl_output::WlOutput, ()> for AppState {
+    fn event(
+        _state: &mut AppState,
+        _output: &wl_output::WlOutput,
+        event: wl_output::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<AppState>,
+    ) {
+        match event {
+            wl_output::Event::Geometry { x, y, physical_width, physical_height, subpixel, make, model, transform } => {
+                log::debug!("wl_output Geometry: x={}, y={}, physical_width={}, physical_height={}, subpixel={:?}, make={}, model={}, transform={:?}",
+                    x, y, physical_width, physical_height, subpixel, make, model, transform);
+            }
+            wl_output::Event::Mode { flags, width, height, refresh } => {
+                log::debug!("wl_output Mode: flags={:?}, width={}, height={}, refresh={}", flags, width, height, refresh);
+            }
+            wl_output::Event::Done => {
+                log::debug!("wl_output Done");
+            }
+            wl_output::Event::Scale { factor } => {
+                log::debug!("wl_output Scale: factor={}", factor);
+            }
+            wl_output::Event::Name { name } => {
+                // This is for wl_output name, which is often not very descriptive (e.g., "wayland-0")
+                 log::debug!("wl_output Name: {}", name);
+            }
+            wl_output::Event::Description { description } => {
+                // This is for wl_output description, usually more descriptive
+                 log::debug!("wl_output Description: {}", description);
+            }
+            _ => {
+                log::trace!("Unhandled wl_output event: {:?}", event);
+            }
+        }
+    }
+}
+
+
+// Dispatcher for zxdg_output_manager_v1
+impl Dispatch<zxdg_output_manager_v1::ZxdgOutputManagerV1, ()> for AppState {
+    fn event(
+        _state: &mut AppState,
+        _manager: &zxdg_output_manager_v1::ZxdgOutputManagerV1,
+        event: zxdg_output_manager_v1::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<AppState>,
+    ) {
+        // zxdg_output_manager_v1 has no events for the client to handle
+        log::trace!("zxdg_output_manager_v1 event: {:?}", event);
+    }
+}
+
+// Dispatcher for zxdg_output_v1
+impl Dispatch<zxdg_output_v1::ZxdgOutputV1, ()> for AppState {
+    fn event(
+        state: &mut AppState,
+        xdg_output: &zxdg_output_v1::ZxdgOutputV1,
+        event: zxdg_output_v1::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<AppState>,
+    ) {
+        let output_entry = state.outputs.iter_mut().find(|(_, _, xdg_opt, _)| xdg_opt.as_ref().map_or(false, |x| x == xdg_output));
+
+        if let Some((_, _, _, info)) = output_entry {
+            match event {
+                zxdg_output_v1::Event::LogicalPosition { x, y } => {
+                    log::debug!("zxdg_output_v1 ({:?}) LogicalPosition: x={}, y={}", xdg_output.id(), x, y);
+                }
+                zxdg_output_v1::Event::LogicalSize { width, height } => {
+                    log::debug!("zxdg_output_v1 ({:?}) LogicalSize: width={}, height={}", xdg_output.id(), width, height);
+                    info.logical_width = width;
+                    info.logical_height = height;
+                }
+                zxdg_output_v1::Event::Done => {
+                    log::debug!("zxdg_output_v1 ({:?}) Done. Current info: {:?}", xdg_output.id(), info);
+                    // Here, all info for this output should be collected.
+                    // We might want to trigger a redraw or re-evaluation of overlay size/position if it depends on this.
+                }
+                zxdg_output_v1::Event::Name { name } => {
+                    log::info!("zxdg_output_v1 ({:?}) Name: {}", xdg_output.id(), name);
+                    info.name = Some(name);
+                }
+                zxdg_output_v1::Event::Description { description } => {
+                    log::info!("zxdg_output_v1 ({:?}) Description: {}", xdg_output.id(), description);
+                    info.description = Some(description);
+                }
+                _ => {
+                     log::trace!("Unhandled zxdg_output_v1 event: {:?}", event);
+                }
+            }
+        } else {
+            log::warn!("Received zxdg_output_v1 event for an unknown output object: {:?}", xdg_output.id());
         }
     }
 }
@@ -788,6 +1096,36 @@ fn validate_config(config: &AppConfig) -> Result<(), String> {
 
 
     Ok(())
+}
+
+fn print_overlay_config_for_check(config: &OverlayConfig) {
+    println!("\nOverlay Configuration:");
+    println!("  Screen:               {}", config.screen.as_deref().unwrap_or("Compositor default"));
+    println!("  Position:             {:?}", config.position);
+
+    let width_str = match config.size_width {
+        Some(SizeDimension::Pixels(px)) => format!("{}px", px),
+        Some(SizeDimension::Ratio(r)) => format!("{:.0}% screen", r * 100.0),
+        None => "Derived from height/layout".to_string(),
+    };
+    let height_str = match config.size_height {
+        Some(SizeDimension::Pixels(px)) => format!("{}px", px),
+        Some(SizeDimension::Ratio(r)) => format!("{:.0}% screen", r * 100.0),
+        None => "Derived from width/layout".to_string(),
+    };
+    println!("  Size Width:           {}", width_str);
+    println!("  Size Height:          {}", height_str);
+
+    println!("  Margins (T,R,B,L):    {}, {}, {}, {}", config.margin_top, config.margin_right, config.margin_bottom, config.margin_left);
+
+    match parse_color_string(&config.background_color_inactive) {
+        Ok((r,g,b,a)) => println!("  Background Inactive:  {} (R:{:.2} G:{:.2} B:{:.2} A:{:.2})", config.background_color_inactive, r,g,b,a),
+        Err(e) => println!("  Background Inactive:  {} (Error: {})", config.background_color_inactive, e),
+    }
+    match parse_color_string(&config.background_color_active) {
+        Ok((r,g,b,a)) => println!("  Background Active:    {} (R:{:.2} G:{:.2} B:{:.2} A:{:.2}) (currently unused for global bg)", config.background_color_active, r,g,b,a),
+        Err(e) => println!("  Background Active:    {} (Error: {})", config.background_color_active, e),
+    }
 }
 
 // Helper struct for --check: Text metrics simulation result
@@ -1074,6 +1412,8 @@ fn main() {
             }
         }
 
+        print_overlay_config_for_check(&app_config.overlay);
+
         println!("\nConfiguration check finished.");
         process::exit(0);
     }
@@ -1128,26 +1468,187 @@ fn main() {
     if cli.overlay {
         log::info!("Overlay mode requested. Attempting to use wlr-layer-shell.");
         if let Some(layer_shell) = app_state.layer_shell.as_ref() {
+            let mut selected_wl_output: Option<&wl_output::WlOutput> = None;
+
+            if let Some(target_screen_specifier) = app_state.config.overlay.screen.as_ref() {
+                log::info!("Attempting to find screen specified as: '{}'", target_screen_specifier);
+                // Try to parse as index first
+                if let Ok(target_idx) = target_screen_specifier.parse::<usize>() {
+                    if let Some((_, wl_output, _, info)) = app_state.outputs.get(target_idx) {
+                        selected_wl_output = Some(wl_output);
+                        log::info!("Selected screen by index {}: {:?}", target_idx, info.name.as_deref().unwrap_or("N/A"));
+                    } else {
+                        log::warn!("Screen index {} out of bounds ({} outputs available). Compositor will choose.", target_idx, app_state.outputs.len());
+                    }
+                } else {
+                    // Try to match by name (zxdg_output_v1 name or description)
+                    let mut found = false;
+                    for (_, wl_output, _, info) in &app_state.outputs {
+                        if info.name.as_deref() == Some(target_screen_specifier) || info.description.as_deref() == Some(target_screen_specifier) {
+                            selected_wl_output = Some(wl_output);
+                            log::info!("Selected screen by name/description '{}': {:?}", target_screen_specifier, info.name.as_deref().unwrap_or("N/A"));
+                            found = true;
+                            break;
+                        }
+                    }
+                    if !found {
+                        log::warn!("Screen specifier '{}' not found by name or description. Compositor will choose.", target_screen_specifier);
+                        log::debug!("Available outputs for matching by name/description:");
+                        for (idx, (_, _, _, info)) in app_state.outputs.iter().enumerate() {
+                            log::debug!("  [{}]: Name: {:?}, Description: {:?}", idx, info.name, info.description);
+                        }
+                    }
+                }
+            } else {
+                log::info!("No specific screen configured. Compositor will choose.");
+            }
+
             let layer_surface_obj = layer_shell.get_layer_surface(
                 &surface,
-                None, // output: None means compositor chooses
+                selected_wl_output, // output: None means compositor chooses
                 zwlr_layer_shell_v1::Layer::Overlay,
                 "wayland-kbd-osd".to_string(), // namespace
                 &qh,
                 ()
             );
             // Configure the layer surface
-            layer_surface_obj.set_anchor(zwlr_layer_surface_v1::Anchor::Bottom);
-            // Example: Position 20 pixels up from the bottom edge, full width if size is 0,0 and anchor left/right also set.
-            // For now, just bottom anchor. Margins can be set here if needed:
-            // layer_surface_obj.set_margin(0, 0, 20, 0); // top, right, bottom, left
+            let anchor = match app_state.config.overlay.position {
+                OverlayPosition::Top => zwlr_layer_surface_v1::Anchor::Top,
+                OverlayPosition::Bottom => zwlr_layer_surface_v1::Anchor::Bottom,
+                OverlayPosition::Left => zwlr_layer_surface_v1::Anchor::Left,
+                OverlayPosition::Right => zwlr_layer_surface_v1::Anchor::Right,
+                OverlayPosition::Center => zwlr_layer_surface_v1::Anchor::empty(), // Centered by default if no anchor
+                OverlayPosition::TopLeft => zwlr_layer_surface_v1::Anchor::Top | zwlr_layer_surface_v1::Anchor::Left,
+                OverlayPosition::TopCenter => zwlr_layer_surface_v1::Anchor::Top, // Rely on centering for horizontal
+                OverlayPosition::TopRight => zwlr_layer_surface_v1::Anchor::Top | zwlr_layer_surface_v1::Anchor::Right,
+                OverlayPosition::BottomLeft => zwlr_layer_surface_v1::Anchor::Bottom | zwlr_layer_surface_v1::Anchor::Left,
+                OverlayPosition::BottomCenter => zwlr_layer_surface_v1::Anchor::Bottom, // Rely on centering for horizontal
+                OverlayPosition::BottomRight => zwlr_layer_surface_v1::Anchor::Bottom | zwlr_layer_surface_v1::Anchor::Right,
+                OverlayPosition::CenterLeft => zwlr_layer_surface_v1::Anchor::Left, // Rely on centering for vertical
+                OverlayPosition::CenterRight => zwlr_layer_surface_v1::Anchor::Right, // Rely on centering for vertical
+            };
+            log::info!("Setting anchor to: {:?}", anchor);
+            layer_surface_obj.set_anchor(anchor);
+
+            let margins = &app_state.config.overlay;
+            log::info!("Setting margins: T={}, R={}, B={}, L={}", margins.margin_top, margins.margin_right, margins.margin_bottom, margins.margin_left);
+            layer_surface_obj.set_margin(margins.margin_top, margins.margin_right, margins.margin_bottom, margins.margin_left);
+
             layer_surface_obj.set_keyboard_interactivity(zwlr_layer_surface_v1::KeyboardInteractivity::None);
             layer_surface_obj.set_exclusive_zone(0); // Do not reserve space
 
-            // Set initial size. Using configured_width/height.
-            // Passing 0,0 would let the compositor suggest a size or fit to content if anchored on all sides.
-            // For an overlay, specific sizing is often desired.
-            layer_surface_obj.set_size(app_state.configured_width as u32, app_state.configured_height as u32);
+            // Determine target screen dimensions for size calculation
+            let mut screen_width_px = WINDOW_WIDTH; // Default if no output info
+            let mut screen_height_px = WINDOW_HEIGHT; // Default if no output info
+
+            if let Some(wl_output) = selected_wl_output {
+                if let Some((_, _, _, info)) = app_state.outputs.iter().find(|(_, o, _, _)| o == wl_output) {
+                    if info.logical_width > 0 && info.logical_height > 0 {
+                        screen_width_px = info.logical_width;
+                        screen_height_px = info.logical_height;
+                        log::info!("Using selected screen dimensions for size calculation: {}x{}", screen_width_px, screen_height_px);
+                    } else {
+                        log::warn!("Selected screen {:?} has no logical dimensions yet. Falling back to default {}x{} for size calculation.", info.name, screen_width_px, screen_height_px);
+                    }
+                }
+            } else if let Some((_, _, _, info)) = app_state.outputs.first() { // Default to first output if none selected
+                if info.logical_width > 0 && info.logical_height > 0 {
+                    screen_width_px = info.logical_width;
+                    screen_height_px = info.logical_height;
+                    log::info!("Using first available screen dimensions for size calculation: {}x{}", screen_width_px, screen_height_px);
+                } else {
+                     log::warn!("First available screen {:?} has no logical dimensions yet. Falling back to default {}x{} for size calculation.", info.name, screen_width_px, screen_height_px);
+                }
+            } else {
+                log::warn!("No screens found/selected. Using default window size {}x{} for overlay size calculation.", screen_width_px, screen_height_px);
+            }
+
+            let (layout_bound_w, layout_bound_h) = app_state.get_key_layout_bounds();
+            let layout_aspect_ratio = if layout_bound_h > 0.0 { layout_bound_w / layout_bound_h } else { 16.0/9.0 }; // Default aspect if no keys
+
+            let mut target_w: u32 = 0; // 0 means compositor decides or derive from other dimension
+            let mut target_h: u32 = 0;
+
+            match app_state.config.overlay.size_width {
+                Some(SizeDimension::Pixels(px)) => target_w = px,
+                Some(SizeDimension::Ratio(r)) => target_w = (screen_width_px as f32 * r).round() as u32,
+                None => {}
+            }
+            match app_state.config.overlay.size_height {
+                Some(SizeDimension::Pixels(px)) => target_h = px,
+                Some(SizeDimension::Ratio(r)) => target_h = (screen_height_px as f32 * r).round() as u32,
+                None => {}
+            }
+
+            // Preserve aspect ratio if one dimension is zero (or not specified)
+            if target_w > 0 && target_h == 0 {
+                if layout_aspect_ratio > 0.0 {
+                    target_h = (target_w as f32 / layout_aspect_ratio).round() as u32;
+                } else { // Should not happen if layout_aspect_ratio has a default
+                    target_h = (target_w as f32 * (9.0/16.0)).round() as u32; // Default to 16:9 portraitish if layout is zero area
+                }
+            } else if target_h > 0 && target_w == 0 {
+                if layout_aspect_ratio > 0.0 {
+                    target_w = (target_h as f32 * layout_aspect_ratio).round() as u32;
+                } else {
+                     target_w = (target_h as f32 * (16.0/9.0)).round() as u32; // Default to 16:9 landscapeish
+                }
+            } else if target_w == 0 && target_h == 0 {
+                 // This case means neither width nor height was specified in config.
+                 // The default for size_height is Ratio(0.3), so this block might not be hit often
+                 // unless defaults are removed or both are explicitly set to null/None in TOML.
+                 // If compositor also suggests 0,0, it could be an issue.
+                 // For now, let layer_surface.set_size(0,0) pass through.
+                 // Compositor might give a default size or size based on content (which is tricky here).
+                 log::warn!("Overlay width and height are both zero. Compositor will determine size. This might be very small.");
+            }
+
+
+            // Ensure calculated size does not exceed screen dimensions, preserving aspect ratio.
+            // This is a "max size" constraint.
+            if target_w > screen_width_px as u32 && screen_width_px > 0 {
+                let original_target_w = target_w;
+                target_w = screen_width_px as u32;
+                if layout_aspect_ratio > 0.0 { // Avoid division by zero
+                    target_h = (target_w as f32 / layout_aspect_ratio).round() as u32;
+                }
+                 log::info!("Target width {} exceeded screen width {}. Adjusted to {}x{} to fit screen width.", original_target_w, screen_width_px, target_w, target_h);
+            }
+            if target_h > screen_height_px as u32 && screen_height_px > 0 {
+                let original_target_h = target_h;
+                target_h = screen_height_px as u32;
+                // If width was also capped, this might shrink it further.
+                // If width was not capped, or if this cap is more restrictive:
+                if layout_aspect_ratio > 0.0 { // Avoid division by zero
+                     target_w = (target_h as f32 * layout_aspect_ratio).round() as u32;
+                }
+                log::info!("Target height {} exceeded screen height {}. Adjusted to {}x{} to fit screen height.", original_target_h, screen_height_px, target_w, target_h);
+            }
+
+            // Final safety check for zero dimensions if layout was empty.
+            // If target_w or target_h is still 0, layer-shell expects this to mean "derive from anchor".
+            // E.g. anchor left+right and width 0 means full width.
+            // If no anchors in a dimension, 0 means "as small as possible" or compositor default.
+            // We want a defined size if possible.
+            if target_w == 0 && target_h == 0 && (layout_bound_w > 0.0 || layout_bound_h > 0.0) {
+                // This implies config asked for 0x0, but we have a layout.
+                // Fallback to a small portion of screen, e.g., 30% height and derive width.
+                target_h = (screen_height_px as f32 * 0.3).round() as u32;
+                if layout_aspect_ratio > 0.0 {
+                    target_w = (target_h as f32 * layout_aspect_ratio).round() as u32;
+                } else {
+                    target_w = (screen_width_px as f32 * 0.5).round() as u32; // Fallback width
+                }
+                log::warn!("Overlay size was 0x0 despite having a layout. Defaulting to {}x{}.", target_w, target_h);
+            }
+
+
+            log::info!("Setting layer surface size to: {}x{}", target_w, target_h);
+            layer_surface_obj.set_size(target_w, target_h);
+
+            // The app_state.configured_width/height will be updated by the compositor via ::Configure event.
+            // We pass our desired size to layer_surface.set_size(). The compositor might adjust it.
+            // The drawing logic uses app_state.configured_width/height.
 
             app_state.layer_surface = Some(layer_surface_obj);
             log::info!("Created and configured layer surface for overlay mode.");
