@@ -1806,45 +1806,10 @@ fn main() {
                 OverlayPosition::CenterRight => zwlr_layer_surface_v1::Anchor::Right,
             };
 
-            let mut final_anchor = base_anchor;
-            match app_state.config.overlay.position {
-                OverlayPosition::Top | OverlayPosition::TopCenter | OverlayPosition::TopLeft | OverlayPosition::TopRight => {
-                    // If anchored to Top but not Bottom, add Bottom for stability with (0,0) initial size.
-                    if base_anchor.contains(zwlr_layer_surface_v1::Anchor::Top) && !base_anchor.contains(zwlr_layer_surface_v1::Anchor::Bottom) {
-                        log::info!("Top-based anchor detected without Bottom anchor. Adding Bottom anchor for initial (0,0) size stability to prevent crash.");
-                        final_anchor |= zwlr_layer_surface_v1::Anchor::Bottom;
-                    }
-                }
-                OverlayPosition::Center => {
-                    // Center is already all sides, log for confirmation.
-                    log::info!("Position is Center. Using all-side anchor for initial (0,0) size stability.");
-                }
-                // For Bottom, Left, Right, and their combinations (excluding Top combinations already handled):
-                OverlayPosition::Bottom | OverlayPosition::BottomCenter | OverlayPosition::BottomLeft | OverlayPosition::BottomRight => {
-                    // If anchored to Bottom but not Top, add Top for stability with (0,0) initial size.
-                    // This helps prevent "y == 0 but anchor doesn't have top and bottom" errors.
-                    if base_anchor.contains(zwlr_layer_surface_v1::Anchor::Bottom) && !base_anchor.contains(zwlr_layer_surface_v1::Anchor::Top) {
-                        log::info!("Bottom-based anchor detected without Top anchor. Adding Top anchor for initial (0,0) size stability to prevent crash.");
-                        final_anchor |= zwlr_layer_surface_v1::Anchor::Top;
-                    }
-                }
-                // NOTE: OverlayPosition::Left and OverlayPosition::Right (and CenterLeft/Right if not already covered)
-                // might need similar treatment for horizontal anchoring if "x == 0 but anchor doesn't have left and right"
-                // errors were observed. For now, only vertical anchoring is adjusted.
-                _ => { // Catches Left, Right, CenterLeft, CenterRight
-                    if base_anchor.contains(zwlr_layer_surface_v1::Anchor::Left) && !base_anchor.contains(zwlr_layer_surface_v1::Anchor::Right) {
-                        log::info!("Left-based anchor detected without Right anchor. Adding Right anchor for initial (0,0) size stability.");
-                        final_anchor |= zwlr_layer_surface_v1::Anchor::Right;
-                    }
-                    if base_anchor.contains(zwlr_layer_surface_v1::Anchor::Right) && !base_anchor.contains(zwlr_layer_surface_v1::Anchor::Left) {
-                        log::info!("Right-based anchor detected without Left anchor. Adding Left anchor for initial (0,0) size stability.");
-                        final_anchor |= zwlr_layer_surface_v1::Anchor::Left;
-                    }
-                    // Note: If a position was, for example, ONLY Left and ONLY Top (e.g. a hypothetical TopLeftExclusive)
-                    // it would have been handled by the Top-anchor logic first, then potentially here if it also met these conditions.
-                    // The |= ensures anchors are only added.
-                }
-            }
+            let final_anchor = base_anchor;
+            // The logic for conditionally adding opposite anchors has been removed.
+            // We now rely on the initial (1,1) surface size to prevent crashes with single-sided anchors,
+            // and `base_anchor` directly reflects the user's intended positioning.
 
             log::info!("Setting anchor to: {:?}", final_anchor);
             layer_surface_obj.set_anchor(final_anchor);
@@ -1856,11 +1821,11 @@ fn main() {
             layer_surface_obj.set_keyboard_interactivity(zwlr_layer_surface_v1::KeyboardInteractivity::None);
             layer_surface_obj.set_exclusive_zone(0); // Do not reserve space
 
-            // Initial size is set to (0,0), meaning compositor decides or use anchor.
+            // Initial size is set to (1,1) as a placeholder to avoid issues with (0,0) and anchors.
             // Actual size will be set later by attempt_configure_layer_surface_size
             // once screen dimensions are known.
-            log::info!("Setting initial layer surface size to (0,0). Actual size will be configured once screen dimensions are known.");
-            layer_surface_obj.set_size(0, 0);
+            log::info!("Setting initial layer surface size to (1,1). Actual size will be configured once screen dimensions are known.");
+            layer_surface_obj.set_size(1, 1);
 
             // We still need to commit the surface for the layer surface to be mapped.
             // The app_state.configured_width/height will be updated by the compositor via ::Configure event.
