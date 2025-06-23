@@ -25,8 +25,8 @@ struct KeyConfig {
     name: String,
     width: f32,
     height: f32,
-    x: f32,
-    y: f32,
+    left: f32,
+    top: f32,
     #[serde(alias = "keycode")] // Accept "keycode" for initial deserialization
     raw_keycode: Option<SerdeValue>, // Will hold string or int from TOML, or be None
     #[serde(skip_deserializing)] // This field is populated after initial deserialization
@@ -385,13 +385,11 @@ impl AppState {
             let mut max_coord_y = f32::MIN;
 
             for key_config in &self.config.key {
-                // Assuming key_config.x and .y are CENTER coordinates from TOML
-                let key_half_width = key_config.width / 2.0;
-                let key_half_height = key_config.height / 2.0;
-                min_coord_x = min_coord_x.min(key_config.x - key_half_width);
-                max_coord_x = max_coord_x.max(key_config.x + key_half_width);
-                min_coord_y = min_coord_y.min(key_config.y - key_half_height);
-                max_coord_y = max_coord_y.max(key_config.y + key_half_height);
+                // key_config.left and .top are TOP-LEFT coordinates from TOML
+                min_coord_x = min_coord_x.min(key_config.left);
+                max_coord_x = max_coord_x.max(key_config.left + key_config.width);
+                min_coord_y = min_coord_y.min(key_config.top);
+                max_coord_y = max_coord_y.max(key_config.top + key_config.height);
             }
 
             let layout_width = max_coord_x - min_coord_x;
@@ -441,9 +439,10 @@ impl AppState {
             let background_color = if is_pressed { background_c_pressed_cairo } else { background_c_default_cairo };
 
             // Apply scaling and offset
-            // Original x, y from config are treated as center points
-            let final_center_x = key_config.x * scale + offset_x;
-            let final_center_y = key_config.y * scale + offset_y;
+            // key_config.left and .top are top-left coordinates.
+            // We need to calculate the center for drawing.
+            let final_center_x = (key_config.left + key_config.width / 2.0) * scale + offset_x;
+            let final_center_y = (key_config.top + key_config.height / 2.0) * scale + offset_y;
             let final_width = key_config.width * scale;
             let final_height = key_config.height * scale;
 
