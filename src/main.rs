@@ -53,7 +53,7 @@ enum OverlayPosition {
 #[derive(Deserialize, Debug, Clone)]
 struct OverlayConfig {
     #[serde(default)]
-    screen: Option<String>, // Monitor name or index (string for now, parse later)
+    screen: Option<String>,
     #[serde(default = "default_overlay_position")]
     position: OverlayPosition,
     size_width: Option<SizeDimension>,
@@ -67,49 +67,67 @@ struct OverlayConfig {
     #[serde(default = "default_overlay_margin")]
     margin_left: i32,
     #[serde(default = "default_background_color_inactive")]
-    background_color_inactive: String,
+    background_color_inactive: String, // Overall background for the overlay window
+    // Note: background_color_active is currently unused for global background, could be removed or repurposed.
     #[serde(default = "default_background_color_active")]
-    background_color_active: String, // Note: "active" here refers to the window, not key press
-    #[serde(default = "default_global_key_background_color_string")]
+    background_color_active: String,
+
+    // Default key appearance (inactive state)
+    #[serde(default = "default_key_background_color_string")]
     default_key_background_color: String,
+    #[serde(default = "default_key_text_color_string")]
+    default_key_text_color: String,
+    #[serde(default = "default_key_outline_color_string")]
+    default_key_outline_color: String,
+
+    // Active key appearance (pressed state)
+    #[serde(default = "default_active_key_background_color_string")]
+    active_key_background_color: String,
+    #[serde(default = "default_active_key_text_color_string")]
+    active_key_text_color: String,
+    // Active key outline could be added if desired, e.g., active_key_outline_color. For now, it uses default_key_outline_color.
 }
 
-fn default_overlay_position() -> OverlayPosition {
-    OverlayPosition::BottomCenter
-}
+fn default_overlay_position() -> OverlayPosition { OverlayPosition::BottomCenter }
+fn default_overlay_margin() -> i32 { 0 }
+fn default_background_color_inactive() -> String { "#00000000".to_string() } // Fully transparent
+fn default_background_color_active() -> String { "#A0A0A0D0".to_string() } // Slightly more opaque grey (unused for global background)
 
-fn default_overlay_margin() -> i32 {
-    0
-}
+// New defaults based on requirements:
+// Key background: 50% opaque, 30% gray. 30% gray = 77 (4D). 50% opacity = 128 (80). -> #4D4D4D80
+fn default_key_background_color_string() -> String { "#4D4D4D80".to_string() }
 
-fn default_background_color_inactive() -> String {
-    "#00000000".to_string() // Fully transparent
-}
+// Key text: 80% opaque, 70% gray. 70% gray = 179 (B3). 80% opacity = 204 (CC). -> #B3B3B3CC
+fn default_key_text_color_string() -> String { "#B3B3B3CC".to_string() }
 
-fn default_background_color_active() -> String {
-    "#A0A0A0D0".to_string() // Slightly more opaque grey (currently unused for global background)
-}
+// Key outline: 80% opaque, 70% gray (same as text). -> #B3B3B3CC
+fn default_key_outline_color_string() -> String { "#B3B3B3CC".to_string() }
 
-// Renamed to avoid confusion with the field name if it were Option<String>
-// Since it's String, the default function must return String.
-fn default_global_key_background_color_string() -> String {
-    "#E0E0E080".to_string() // Translucent light grey
-}
+// Active key background: Use current pressed color #A0A0F0FF as default.
+fn default_active_key_background_color_string() -> String { "#A0A0F0FF".to_string() }
+
+// Active key text: Default to same as inactive key text, but configurable.
+fn default_active_key_text_color_string() -> String { default_key_text_color_string() }
+
 
 impl Default for OverlayConfig {
     fn default() -> Self {
         OverlayConfig {
             screen: None,
             position: default_overlay_position(),
-            size_width: None, // No default width, derive from height or layout
-            size_height: Some(SizeDimension::Ratio(0.3)), // Default to 30% screen height
+            size_width: None,
+            size_height: Some(SizeDimension::Ratio(0.3)),
             margin_top: default_overlay_margin(),
             margin_right: default_overlay_margin(),
             margin_bottom: default_overlay_margin(),
             margin_left: default_overlay_margin(),
             background_color_inactive: default_background_color_inactive(),
-            background_color_active: default_background_color_active(),
-            default_key_background_color: default_global_key_background_color_string(),
+            background_color_active: default_background_color_active(), // Keep for now, though unused
+            default_key_background_color: default_key_background_color_string(),
+            default_key_text_color: default_key_text_color_string(),
+            default_key_outline_color: default_key_outline_color_string(),
+            active_key_background_color: default_active_key_background_color_string(),
+            active_key_text_color: default_active_key_text_color_string(),
         }
     }
 }
@@ -838,58 +856,80 @@ impl AppState {
         // DEFAULT_ROTATION_DEGREES
         // DEFAULT_TEXT_SIZE_UNSCALED
 
-        // Default colors for Cairo: (R, G, B, A) with values from 0.0 to 1.0
-        let border_c_cairo = (0x80 as f64 / 255.0, 0x80 as f64 / 255.0, 0x80 as f64 / 255.0, 0xFF as f64 / 255.0);
-        // let background_c_default_cairo = (0xE0 as f64 / 255.0, 0xE0 as f64 / 255.0, 0xE0 as f64 / 255.0, 0xFF as f64 / 255.0); // No longer used directly
-        let background_c_pressed_cairo = (0xA0 as f64 / 255.0, 0xA0 as f64 / 255.0, 0xF0 as f64 / 255.0, 0xFF as f64 / 255.0);
-        let text_c_cairo = (0x10 as f64 / 255.0, 0x10 as f64 / 255.0, 0x10 as f64 / 255.0, 0xFF as f64 / 255.0);
+        // Parse colors from config. Use fallbacks if parsing fails.
+        let default_fallback_color = (0.1, 0.1, 0.1, 1.0); // Opaque dark gray as a last resort
 
+        let key_outline_color_tuple = parse_color_string(&self.config.overlay.default_key_outline_color)
+            .unwrap_or_else(|e| {
+                log::error!("Failed to parse default_key_outline_color '{}': {}. Using fallback.", &self.config.overlay.default_key_outline_color, e);
+                default_fallback_color
+            });
+
+        let default_key_text_color_tuple = parse_color_string(&self.config.overlay.default_key_text_color)
+            .unwrap_or_else(|e| {
+                log::error!("Failed to parse default_key_text_color '{}': {}. Using fallback.", &self.config.overlay.default_key_text_color, e);
+                default_fallback_color
+            });
+
+        let active_key_bg_color_tuple = parse_color_string(&self.config.overlay.active_key_background_color)
+            .unwrap_or_else(|e| {
+                log::error!("Failed to parse active_key_background_color '{}': {}. Using fallback.", &self.config.overlay.active_key_background_color, e);
+                // Fallback for active key bg might be a visually distinct color
+                (0.6, 0.6, 0.9, 1.0) // Opaque light purplish blue
+            });
+
+        let active_key_text_color_tuple = parse_color_string(&self.config.overlay.active_key_text_color)
+            .unwrap_or_else(|e| {
+                log::error!("Failed to parse active_key_text_color '{}': {}. Using fallback.", &self.config.overlay.active_key_text_color, e);
+                default_key_text_color_tuple // Fallback to default key text color if active one fails
+            });
+
+        // Fallback for inactive key background if both per-key and global default fail parsing.
+        // This uses the new default_key_background_color_string() which is #4D4D4D80
+        let ultimate_inactive_key_bg_fallback_tuple = parse_color_string(&default_key_background_color_string())
+            .unwrap_or_else(|_| (0.3, 0.3, 0.3, 0.5)); // Should not fail, but as a code fallback.
 
         let mut keys_to_draw: Vec<KeyDisplay> = Vec::new();
 
         for key_config in &self.config.key {
             let is_pressed = *self.key_states.get(&key_config.keycode).unwrap_or(&false);
 
-            // Define the ultimate fallback color tuple once, from the default string.
-            // This ensures the hardcoded fallback is indeed the intended translucent one.
-            let ultimate_fallback_color_tuple = parse_color_string(&default_global_key_background_color_string())
-                .unwrap_or_else(|_| (0.878, 0.878, 0.878, 0.5)); // #E0E0E080 as tuple, should not fail
-
             let current_bg_color_tuple = if is_pressed {
-                background_c_pressed_cairo // This is already a parsed (r,g,b,a) tuple
+                active_key_bg_color_tuple
             } else {
                 // Determine inactive background color based on priority
                 // 1. Per-key config
-                // 2. Global overlay config
-                // 3. Hardcoded ultimate fallback (derived from default_global_key_background_color_string)
-                let color_to_use = key_config.background_color.as_ref()
-                    .map(|per_key_color_str| {
-                        parse_color_string(per_key_color_str).unwrap_or_else(|e| {
-                            log::error!(
-                                "Failed to parse per-key background_color string '{}' for key '{}': {}. Using global/hardcoded default.",
-                                per_key_color_str, key_config.name, e
-                            );
-                            // Fallback to global default string for parsing
-                            parse_color_string(&self.config.overlay.default_key_background_color).unwrap_or_else(|e_global| {
+                // 2. Global overlay config (default_key_background_color)
+                // 3. Hardcoded ultimate fallback (derived from default_key_background_color_string())
+                key_config.background_color.as_ref()
+                    .and_then(|per_key_color_str| {
+                        match parse_color_string(per_key_color_str) {
+                            Ok(color) => Some(color),
+                            Err(e) => {
                                 log::error!(
-                                    "Failed to parse global default_key_background_color string '{}': {}. Using hardcoded ultimate fallback.",
-                                    &self.config.overlay.default_key_background_color, e_global
+                                    "Failed to parse per-key background_color string '{}' for key '{}': {}. Trying global default.",
+                                    per_key_color_str, key_config.name, e
                                 );
-                                ultimate_fallback_color_tuple
-                            })
-                        })
+                                None // Fall through to global default
+                            }
+                        }
                     })
                     .unwrap_or_else(|| {
-                        // No per-key color, so use global default string for parsing
+                        // No per-key color or it failed parsing, so use global default string for parsing
                         parse_color_string(&self.config.overlay.default_key_background_color).unwrap_or_else(|e_global| {
                             log::error!(
                                 "Failed to parse global default_key_background_color string '{}': {}. Using hardcoded ultimate fallback.",
                                 &self.config.overlay.default_key_background_color, e_global
                             );
-                            ultimate_fallback_color_tuple
+                            ultimate_inactive_key_bg_fallback_tuple
                         })
-                    });
-                color_to_use
+                    })
+            };
+
+            let current_text_color_tuple = if is_pressed {
+                active_key_text_color_tuple
+            } else {
+                default_key_text_color_tuple
             };
 
             // Apply scaling and offset
@@ -916,9 +956,9 @@ impl AppState {
                 border_thickness: final_border_thickness,
                 rotation_degrees: final_rotation, // Rotation is absolute
                 text_size: final_text_size,
-                border_color: border_c_cairo,
-                background_color: current_bg_color_tuple,
-                text_color: text_c_cairo,
+                border_color: key_outline_color_tuple,     // Use new configurable outline color
+                background_color: current_bg_color_tuple,  // Uses active or inactive logic
+                text_color: current_text_color_tuple,      // Uses active or inactive logic
             };
             keys_to_draw.push(key_display);
         }
@@ -940,7 +980,7 @@ impl AppState {
         // The manual pixel copy loop is no longer needed as Cairo draws directly into mmap_slice.
         // The mmap_slice was a mutable borrow from self.mmap.as_mut().unwrap(), so changes are reflected.
 
-        log::info!("Drawing content with Cairo complete.");
+        log::debug!("Drawing content with Cairo complete.");
         surface.attach(Some(&buffer), 0, 0);
         surface.damage_buffer(0, 0, width, height);
         surface.commit();
@@ -1766,22 +1806,27 @@ fn main() {
                 OverlayPosition::CenterRight => zwlr_layer_surface_v1::Anchor::Right,
             };
 
-            // If initial size is (0,0) and anchor has Bottom but not Top, add Top.
-            // This is to prevent "y == 0 but anchor doesn't have top and bottom" error.
-            // Also, if position is Center and we are setting size (0,0), it's safer to anchor all sides.
-            let mut anchor_to_use = base_anchor;
-            if base_anchor.contains(zwlr_layer_surface_v1::Anchor::Bottom) && !base_anchor.contains(zwlr_layer_surface_v1::Anchor::Top) {
-                log::info!("Initial anchor includes Bottom but not Top. Adding Top anchor for initial (0,0) size stability.");
-                anchor_to_use = base_anchor | zwlr_layer_surface_v1::Anchor::Top;
-            } else if app_state.config.overlay.position == OverlayPosition::Center {
-                 // For OverlayPosition::Center, base_anchor was already set to all sides.
-                 // This explicit log helps confirm the thinking.
-                 log::info!("Position is Center. Using all-side anchor for initial (0,0) size stability.");
+            let mut final_anchor = base_anchor;
+            match app_state.config.overlay.position {
+                OverlayPosition::Top | OverlayPosition::TopCenter | OverlayPosition::TopLeft | OverlayPosition::TopRight => {
+                    // If anchored to Top but not Bottom, add Bottom for stability with (0,0) initial size.
+                    if base_anchor.contains(zwlr_layer_surface_v1::Anchor::Top) && !base_anchor.contains(zwlr_layer_surface_v1::Anchor::Bottom) {
+                        log::info!("Top-based anchor detected without Bottom anchor. Adding Bottom anchor for initial (0,0) size stability to prevent crash.");
+                        final_anchor |= zwlr_layer_surface_v1::Anchor::Bottom;
+                    }
+                }
+                OverlayPosition::Center => {
+                    // Center is already all sides, log for confirmation.
+                    log::info!("Position is Center. Using all-side anchor for initial (0,0) size stability.");
+                }
+                // For Bottom, Left, Right, and their combinations (excluding Top combinations already handled):
+                // The previous fix for bottom positioning (removing auto-add of Top) is maintained by not having specific logic here
+                // unless a similar crash ("x == 0 but anchor doesn't have left and right") were reported for Left/Right positions.
+                _ => {}
             }
 
-
-            log::info!("Setting anchor to: {:?}", anchor_to_use);
-            layer_surface_obj.set_anchor(anchor_to_use);
+            log::info!("Setting anchor to: {:?}", final_anchor);
+            layer_surface_obj.set_anchor(final_anchor);
 
             let margins = &app_state.config.overlay;
             log::info!("Setting margins: T={}, R={}, B={}, L={}", margins.margin_top, margins.margin_right, margins.margin_bottom, margins.margin_left);
