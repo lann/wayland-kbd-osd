@@ -182,8 +182,8 @@ mod tests {
     }
 
     #[test]
-    fn test_startup_overlay_mode_no_crash() {
-        println!("[TEST_OVERLAY] Starting Sway with verbose logging...");
+    fn test_startup_default_overlay_mode_no_crash() { // Renamed test
+        println!("[TEST_DEFAULT_OVERLAY] Starting Sway with verbose logging..."); // Log prefix updated
         let mut sway_process = Command::new("sway")
             .arg("--config")
             .arg("/dev/null") // Use default configuration
@@ -210,7 +210,7 @@ mod tests {
 
         let stderr_thread = thread::spawn(move || {
             for line in stderr_reader.lines().map_while(Result::ok) {
-                println!("[SWAY_OVERLAY STDERR] {}", line); // Print sway's stderr for debugging
+                println!("[SWAY_DEFAULT_OVERLAY STDERR] {}", line); // Log prefix updated
                 let mut stderr_lock = sway_stderr_clone.lock().unwrap();
                 stderr_lock.push_str(&line);
                 stderr_lock.push('\n');
@@ -226,12 +226,12 @@ mod tests {
         );
         let stdout_thread = thread::spawn(move || {
             for line in stdout_reader.lines().map_while(Result::ok) {
-                println!("[SWAY_OVERLAY STDOUT] {}", line);
+                println!("[SWAY_DEFAULT_OVERLAY STDOUT] {}", line); // Log prefix updated
             }
         });
 
         println!(
-            "[TEST_OVERLAY] Waiting for Sway to initialize and output WAYLAND_DISPLAY (max 10s)..."
+            "[TEST_DEFAULT_OVERLAY] Waiting for Sway to initialize and output WAYLAND_DISPLAY (max 10s)..." // Log prefix updated
         );
         let wayland_display_name = Arc::new(Mutex::new(None::<String>));
         let wayland_display_name_clone = wayland_display_name.clone();
@@ -245,7 +245,7 @@ mod tests {
                 stdout_thread.join().expect("Sway stdout thread panicked");
                 let final_stderr = sway_stderr_arc.lock().unwrap();
                 panic!(
-                    "[TEST_OVERLAY] Sway exited prematurely with status: {}. Sway stderr:\n{}",
+                    "[TEST_DEFAULT_OVERLAY] Sway exited prematurely with status: {}. Sway stderr:\n{}", // Log prefix updated
                     status, *final_stderr
                 );
             }
@@ -254,7 +254,7 @@ mod tests {
             if let Some(display_name) = get_wayland_display_from_sway(&stderr_lock) {
                 let mut wdn_lock = wayland_display_name_clone.lock().unwrap();
                 *wdn_lock = Some(display_name.clone());
-                println!("[TEST_OVERLAY] Found WAYLAND_DISPLAY: {}", display_name);
+                println!("[TEST_DEFAULT_OVERLAY] Found WAYLAND_DISPLAY: {}", display_name); // Log prefix updated
                 break;
             }
         }
@@ -262,84 +262,245 @@ mod tests {
         let display_name_guard = wayland_display_name.lock().unwrap();
         let wayland_display_name_str = display_name_guard
             .as_ref()
-            .expect("[TEST_OVERLAY] Failed to find WAYLAND_DISPLAY in sway output after 10s.");
+            .expect("[TEST_DEFAULT_OVERLAY] Failed to find WAYLAND_DISPLAY in sway output after 10s."); // Log prefix updated
 
         println!(
-            "[TEST_OVERLAY] Sway appears to be running with WAYLAND_DISPLAY={}",
+            "[TEST_DEFAULT_OVERLAY] Sway appears to be running with WAYLAND_DISPLAY={}", // Log prefix updated
             wayland_display_name_str
         );
 
         println!(
-            "[TEST_OVERLAY] Starting application with --overlay and WAYLAND_DISPLAY={}",
+            "[TEST_DEFAULT_OVERLAY] Starting application (default overlay mode) with WAYLAND_DISPLAY={}", // Log prefix updated
             wayland_display_name_str
         );
         let mut app_process = Command::new("cargo")
             .arg("run")
-            .arg("--") // Separator for cargo run to pass arguments to the binary
-            .arg("--overlay") // Add the overlay flag
+            // No specific mode flag, should default to overlay
             .env("WAYLAND_DISPLAY", wayland_display_name_str) // Use the extracted string
             .stdout(Stdio::inherit()) // Inherit App's stdout
             .stderr(Stdio::inherit()) // Inherit App's stderr
             .spawn()
-            .expect("Failed to start the application in overlay mode.");
+            .expect("Failed to start the application in default overlay mode.");
 
         println!(
-            "[TEST_OVERLAY] Application process started. Sleeping for 3 seconds to let it run..."
+            "[TEST_DEFAULT_OVERLAY] Application process started. Sleeping for 3 seconds to let it run..." // Log prefix updated
         );
         thread::sleep(Duration::from_secs(3));
 
-        println!("[TEST_OVERLAY] Checking if application exited prematurely...");
+        println!("[TEST_DEFAULT_OVERLAY] Checking if application exited prematurely..."); // Log prefix updated
         if let Ok(Some(status)) = app_process.try_wait() {
             println!(
-                "[TEST_OVERLAY] Application exited prematurely with status: {}",
+                "[TEST_DEFAULT_OVERLAY] Application exited prematurely with status: {}", // Log prefix updated
                 status
             );
             sway_process.kill().ok();
             panic!(
-                "[TEST_OVERLAY] Application exited prematurely with status: {}",
+                "[TEST_DEFAULT_OVERLAY] Application exited prematurely with status: {}", // Log prefix updated
                 status
             );
         }
 
         println!(
-            "[TEST_OVERLAY] Application appears to be running. Killing application process..."
+            "[TEST_DEFAULT_OVERLAY] Application appears to be running. Killing application process..." // Log prefix updated
         );
         if app_process.kill().is_err() {
-            println!("[TEST_OVERLAY] Failed to send kill signal to application (it might have already exited).");
+            println!("[TEST_DEFAULT_OVERLAY] Failed to send kill signal to application (it might have already exited)."); // Log prefix updated
             match app_process.wait() {
                 Ok(status) => {
-                    println!("[TEST_OVERLAY] Application (after failed kill attempt) exited with status: {}", status);
+                    println!("[TEST_DEFAULT_OVERLAY] Application (after failed kill attempt) exited with status: {}", status); // Log prefix updated
                     if !status.success() {
                         sway_process.kill().ok();
-                        panic!("[TEST_OVERLAY] Application exited with error status {} after failed kill attempt.", status);
+                        panic!("[TEST_DEFAULT_OVERLAY] Application exited with error status {} after failed kill attempt.", status); // Log prefix updated
                     }
                 }
                 Err(e) => {
                     sway_process.kill().ok();
                     panic!(
-                        "[TEST_OVERLAY] Failed to wait for app after kill attempt failed: {}",
+                        "[TEST_DEFAULT_OVERLAY] Failed to wait for app after kill attempt failed: {}", // Log prefix updated
                         e
                     );
                 }
             }
         } else {
-            println!("[TEST_OVERLAY] Kill signal sent to application. Waiting for it to exit...");
+            println!("[TEST_DEFAULT_OVERLAY] Kill signal sent to application. Waiting for it to exit..."); // Log prefix updated
             match app_process.wait() {
                 Ok(status) => println!(
-                    "[TEST_OVERLAY] Application exited after kill with status: {}",
+                    "[TEST_DEFAULT_OVERLAY] Application exited after kill with status: {}", // Log prefix updated
                     status
                 ),
                 Err(e) => {
-                    println!("[TEST_OVERLAY] Error waiting for application process after kill: {}. Proceeding to kill Sway.", e);
+                    println!("[TEST_DEFAULT_OVERLAY] Error waiting for application process after kill: {}. Proceeding to kill Sway.", e); // Log prefix updated
                 }
             }
         }
 
-        println!("[TEST_OVERLAY] Killing Sway process...");
+        println!("[TEST_DEFAULT_OVERLAY] Killing Sway process..."); // Log prefix updated
         sway_process.kill().ok();
 
         println!(
-            "[TEST_OVERLAY] Test logic complete. Review output above for application behavior."
+            "[TEST_DEFAULT_OVERLAY] Test logic complete. Review output above for application behavior." // Log prefix updated
+        );
+    }
+
+    #[test]
+    fn test_startup_window_mode_no_crash() {
+        println!("[TEST_WINDOW] Starting Sway with verbose logging...");
+        let mut sway_process = Command::new("sway")
+            .arg("--config")
+            .arg("/dev/null") // Use default configuration
+            .arg("--verbose") // Enable verbose logging to capture WAYLAND_DISPLAY
+            .env_remove("WAYLAND_DISPLAY") // Unset WAYLAND_DISPLAY for headless mode
+            .env("WLR_BACKENDS", "headless") // Use headless backend
+            .env("XWAYLAND", "0") // Disable Xwayland
+            .stdout(Stdio::piped()) // Capture stdout
+            .stderr(Stdio::piped()) // Capture stderr to parse for WAYLAND_DISPLAY
+            .spawn()
+            .expect(
+                "Failed to start sway headless server. Make sure sway is installed and in PATH.",
+            );
+
+        let sway_stderr_arc = Arc::new(Mutex::new(String::new()));
+        let sway_stderr_clone = sway_stderr_arc.clone();
+
+        let stderr_reader = BufReader::new(
+            sway_process
+                .stderr
+                .take()
+                .expect("Failed to get sway stderr"),
+        );
+
+        let stderr_thread = thread::spawn(move || {
+            for line in stderr_reader.lines().map_while(Result::ok) {
+                println!("[SWAY_WINDOW STDERR] {}", line); // Print sway's stderr for debugging
+                let mut stderr_lock = sway_stderr_clone.lock().unwrap();
+                stderr_lock.push_str(&line);
+                stderr_lock.push('\n');
+            }
+        });
+
+        // Also consume stdout to prevent blocking
+        let stdout_reader = BufReader::new(
+            sway_process
+                .stdout
+                .take()
+                .expect("Failed to get sway stdout"),
+        );
+        let stdout_thread = thread::spawn(move || {
+            for line in stdout_reader.lines().map_while(Result::ok) {
+                println!("[SWAY_WINDOW STDOUT] {}", line);
+            }
+        });
+
+        println!(
+            "[TEST_WINDOW] Waiting for Sway to initialize and output WAYLAND_DISPLAY (max 10s)..."
+        );
+        let wayland_display_name = Arc::new(Mutex::new(None::<String>));
+        let wayland_display_name_clone = wayland_display_name.clone();
+
+        for _ in 0..20 {
+            // Check every 0.5s for 10s
+            thread::sleep(Duration::from_millis(500));
+            if let Ok(Some(status)) = sway_process.try_wait() {
+                // Sway exited, join threads to get full output
+                stderr_thread.join().expect("Sway stderr thread panicked");
+                stdout_thread.join().expect("Sway stdout thread panicked");
+                let final_stderr = sway_stderr_arc.lock().unwrap();
+                panic!(
+                    "[TEST_WINDOW] Sway exited prematurely with status: {}. Sway stderr:\n{}",
+                    status, *final_stderr
+                );
+            }
+
+            let stderr_lock = sway_stderr_arc.lock().unwrap();
+            if let Some(display_name) = get_wayland_display_from_sway(&stderr_lock) {
+                let mut wdn_lock = wayland_display_name_clone.lock().unwrap();
+                *wdn_lock = Some(display_name.clone());
+                println!("[TEST_WINDOW] Found WAYLAND_DISPLAY: {}", display_name);
+                break;
+            }
+        }
+
+        let display_name_guard = wayland_display_name.lock().unwrap();
+        let wayland_display_name_str = display_name_guard
+            .as_ref()
+            .expect("[TEST_WINDOW] Failed to find WAYLAND_DISPLAY in sway output after 10s.");
+
+        println!(
+            "[TEST_WINDOW] Sway appears to be running with WAYLAND_DISPLAY={}",
+            wayland_display_name_str
+        );
+
+        println!(
+            "[TEST_WINDOW] Starting application with --window and WAYLAND_DISPLAY={}",
+            wayland_display_name_str
+        );
+        let mut app_process = Command::new("cargo")
+            .arg("run")
+            .arg("--") // Separator for cargo run to pass arguments to the binary
+            .arg("--window") // Add the --window flag
+            .env("WAYLAND_DISPLAY", wayland_display_name_str)
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .expect("Failed to start the application in window mode.");
+
+        println!(
+            "[TEST_WINDOW] Application process started. Sleeping for 3 seconds to let it run..."
+        );
+        thread::sleep(Duration::from_secs(3));
+
+        println!("[TEST_WINDOW] Checking if application exited prematurely...");
+        if let Ok(Some(status)) = app_process.try_wait() {
+            println!(
+                "[TEST_WINDOW] Application exited prematurely with status: {}",
+                status
+            );
+            sway_process.kill().ok();
+            panic!(
+                "[TEST_WINDOW] Application exited prematurely with status: {}",
+                status
+            );
+        }
+
+        println!(
+            "[TEST_WINDOW] Application appears to be running. Killing application process..."
+        );
+        if app_process.kill().is_err() {
+            println!("[TEST_WINDOW] Failed to send kill signal to application (it might have already exited).");
+            match app_process.wait() {
+                Ok(status) => {
+                    println!("[TEST_WINDOW] Application (after failed kill attempt) exited with status: {}", status);
+                    if !status.success() {
+                        sway_process.kill().ok();
+                        panic!("[TEST_WINDOW] Application exited with error status {} after failed kill attempt.", status);
+                    }
+                }
+                Err(e) => {
+                    sway_process.kill().ok();
+                    panic!(
+                        "[TEST_WINDOW] Failed to wait for app after kill attempt failed: {}",
+                        e
+                    );
+                }
+            }
+        } else {
+            println!("[TEST_WINDOW] Kill signal sent to application. Waiting for it to exit...");
+            match app_process.wait() {
+                Ok(status) => println!(
+                    "[TEST_WINDOW] Application exited after kill with status: {}",
+                    status
+                ),
+                Err(e) => {
+                    println!("[TEST_WINDOW] Error waiting for application process after kill: {}. Proceeding to kill Sway.", e);
+                }
+            }
+        }
+
+        println!("[TEST_WINDOW] Killing Sway process...");
+        sway_process.kill().ok();
+
+        println!(
+            "[TEST_WINDOW] Test logic complete. Review output above for application behavior."
         );
     }
 }

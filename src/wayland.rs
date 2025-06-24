@@ -69,10 +69,19 @@ pub struct AppState {
     pub target_output_identifier: Option<String>,
     pub identified_target_wl_output_name: Option<u32>,
     pub frame_callback: Option<wl_callback::WlCallback>,
+
+    // New fields for mode and window color
+    pub is_window_mode: bool,
+    pub window_background_color: (f64, f64, f64, f64),
+    // pub active_modifiers: u32, // If needed later for overlay active state
 }
 
 impl AppState {
-    pub fn new(app_config: AppConfig) -> Self {
+    pub fn new(
+        app_config: AppConfig,
+        is_window_mode: bool, // New parameter
+        window_background_color: (f64, f64, f64, f64), // New parameter
+    ) -> Self {
         let mut key_states_map = HashMap::new();
         for key_conf in app_config.key.iter() {
             key_states_map.insert(key_conf.keycode, false);
@@ -106,6 +115,11 @@ impl AppState {
             target_output_identifier: app_config.overlay.screen.clone(),
             identified_target_wl_output_name: None,
             frame_callback: None,
+
+            // Initialize new fields
+            is_window_mode,
+            window_background_color,
+            // active_modifiers: 0, // If added
         }
     }
 
@@ -448,10 +462,32 @@ impl AppState {
             .collect();
         // --- End of logic moved from draw::render_keyboard_to_context ---
 
+        let final_background_color: (f64, f64, f64, f64);
+        if self.is_window_mode {
+            final_background_color = self.window_background_color;
+        } else {
+            // Overlay mode
+            // Consider active state for background if desired, e.g., based on key_states
+            let is_overlay_active = self.key_states.values().any(|&pressed| pressed);
+            let bg_color_str = if is_overlay_active {
+                &self.config.overlay.background_color_active
+            } else {
+                &self.config.overlay.background_color_inactive
+            };
+            final_background_color = parse_color_string(bg_color_str).unwrap_or_else(|e| {
+                log::warn!(
+                    "Failed to parse overlay background color string '{}': {}. Using transparent black.",
+                    bg_color_str,
+                    e
+                );
+                (0.0, 0.0, 0.0, 0.0) // Default to transparent black
+            });
+        }
+
         draw::paint_all_keys(
             &ctx,
             &keys_to_draw,
-            &self.config.overlay.background_color_inactive,
+            final_background_color, // Pass the tuple
             &cairo_font_face,
         );
 

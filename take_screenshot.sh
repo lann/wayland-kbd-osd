@@ -82,8 +82,10 @@ if [ -z "$WAYLAND_DISPLAY_NAME" ]; then
 fi
 
 # --- Run the application ---
-echo "Starting $APP_NAME --overlay on WAYLAND_DISPLAY=$WAYLAND_DISPLAY_NAME..."
-WAYLAND_DISPLAY="$WAYLAND_DISPLAY_NAME" "$APP_NAME" --overlay &
+echo "Starting $APP_NAME --window on WAYLAND_DISPLAY=$WAYLAND_DISPLAY_NAME..."
+# Changed --overlay to --window. Default black background will be used.
+# If a specific color is desired for screenshots, add e.g. --window-color "#123456FF"
+WAYLAND_DISPLAY="$WAYLAND_DISPLAY_NAME" "$APP_NAME" --window &
 APP_PID=$!
 
 # Wait for the application to start
