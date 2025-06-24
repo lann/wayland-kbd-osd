@@ -420,6 +420,17 @@ fn main() {
 
     log::info!("Initial setup phase complete. Wayland window should be configured or awaiting configuration. Waiting for events...");
 
+    // Ensure the drawing loop starts if initial configuration didn't trigger a draw and callback.
+    if app_state.needs_redraw && app_state.frame_callback.is_none() {
+        if let Some(surface) = app_state.surface.as_ref() {
+            log::debug!("Main setup: needs_redraw is true and no frame_callback pending, requesting initial frame callback.");
+            let callback = surface.frame(&qh, ());
+            app_state.frame_callback = Some(callback);
+        } else {
+            log::warn!("Main setup: needs_redraw is true, but surface is None. Cannot request initial frame callback.");
+        }
+    }
+
     log::info!("Entering main event loop.");
 
     let wayland_raw_fd: RawFd = match conn.prepare_read() {
@@ -521,14 +532,19 @@ fn main() {
             break;
         }
 
-        if app_state.needs_redraw {
-            if app_state.surface.is_some() {
-                log::debug!("Main loop: needs_redraw is true, calling draw.");
-                app_state.draw(&qh);
-                app_state.needs_redraw = false;
+        if app_state.needs_redraw && app_state.frame_callback.is_none() {
+            if let Some(surface) = app_state.surface.as_ref() {
+                log::debug!("Main loop: needs_redraw is true and no frame_callback pending, requesting frame callback.");
+                let callback = surface.frame(&qh, ());
+                app_state.frame_callback = Some(callback);
+                // The actual draw will happen when the frame callback fires.
+                // needs_redraw remains true until the draw in the callback.
             } else {
-                log::warn!("Main loop: needs_redraw is true, but surface is None. Skipping draw.");
-                app_state.needs_redraw = false;
+                log::warn!("Main loop: needs_redraw is true, but surface is None. Cannot request frame callback.");
+                // If there's no surface, we can't request a callback.
+                // We might set needs_redraw to false to prevent spamming this log,
+                // or rely on other parts of the code to re-set it when a surface appears.
+                // For now, let it remain true, as the callback handler also checks for surface.
             }
         }
 
