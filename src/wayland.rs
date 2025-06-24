@@ -1,7 +1,7 @@
 // Wayland interaction
 // Added for input::Libinput
 use wayland_client::protocol::{
-    wl_buffer, wl_compositor, wl_output, wl_registry, wl_shm, wl_shm_pool, wl_surface,
+    wl_buffer, wl_callback, wl_compositor, wl_output, wl_registry, wl_shm, wl_shm_pool, wl_surface,
 };
 use wayland_client::{Connection, Dispatch, EventQueue, Proxy, QueueHandle};
 use wayland_protocols::xdg::shell::client::{xdg_surface, xdg_toplevel, xdg_wm_base};
@@ -68,6 +68,7 @@ pub struct AppState {
     pub initial_surface_size_set: bool,
     pub target_output_identifier: Option<String>,
     pub identified_target_wl_output_name: Option<u32>,
+    pub frame_callback: Option<wl_callback::WlCallback>,
 }
 
 impl AppState {
@@ -104,6 +105,7 @@ impl AppState {
             initial_surface_size_set: false,
             target_output_identifier: app_config.overlay.screen.clone(),
             identified_target_wl_output_name: None,
+            frame_callback: None,
         }
     }
 
@@ -461,6 +463,17 @@ impl AppState {
         if let Some(old_buffer) = self.buffer.replace(buffer) {
             old_buffer.destroy();
         }
+
+        // After drawing and committing, if no frame callback is already pending, request one.
+        if self.frame_callback.is_none() {
+            if let Some(surface_ref) = self.surface.as_ref() {
+                let callback = surface_ref.frame(qh, ());
+                self.frame_callback = Some(callback);
+                log::trace!("Frame callback requested from AppState::draw");
+            } else {
+                log::warn!("AppState::draw: Cannot request frame callback, surface is None after draw logic.");
+            }
+        }
     }
 }
 
@@ -528,9 +541,13 @@ impl Dispatch<xdg_surface::XdgSurface, ()> for AppState {
     ) {
         if let xdg_surface::Event::Configure { serial, .. } = e {
             p.ack_configure(serial);
+            s.needs_redraw = true; // Signal that a redraw is needed
             if s.surface.is_some() {
+                // Calling draw here will perform the initial draw and schedule the first frame callback.
+                // The needs_redraw flag will be handled by the frame callback logic thereafter.
                 s.draw(qh);
-                s.needs_redraw = false;
+            } else {
+                log::warn!("XDGSurface Configure: surface is None, cannot draw or schedule frame callback yet.");
             }
         }
     }
@@ -720,6 +737,60 @@ impl Dispatch<zxdg_output_v1::ZxdgOutputV1, ()> for AppState {
         }
     }
 }
+
+impl Dispatch<wl_callback::WlCallback, ()> for AppState {
+    fn event(
+        state: &mut Self,
+        callback: &wl_callback::WlCallback,
+        event: wl_callback::Event,
+        _: &(),
+        _: &Connection,
+        qh: &QueueHandle<Self>,
+    ) {
+        if let wl_callback::Event::Done { .. } = event {
+            log::trace!("Frame callback done for callback ID: {:?}", callback.id());
+
+            // Clear the stored callback, as it's a one-shot.
+            state.frame_callback = None;
+
+            if state.needs_redraw {
+                if state.surface.is_some() {
+                    log::debug!("Frame callback: needs_redraw is true, calling draw.");
+                    state.draw(qh); // draw() will request a new frame callback
+                    state.needs_redraw = false; // Reset after draw
+                } else {
+                    log::warn!("Frame callback: needs_redraw is true, but surface is None. Skipping draw.");
+                    state.needs_redraw = false;
+                    // Request a new frame callback even if we skipped draw, to keep the loop alive
+                    // if the surface appears later and needs_redraw is set again.
+                    if let Some(surface) = state.surface.as_ref() {
+                        if state.frame_callback.is_none() {
+                            let callback = surface.frame(qh, ());
+                            state.frame_callback = Some(callback);
+                            log::trace!("Frame callback requested from wl_callback::Done (surface present, draw skipped)");
+                        }
+                    }
+                }
+            } else {
+                // If no redraw was needed, but a frame callback was pending,
+                // we might still want to request another one if the application
+                // expects to draw intermittently.
+                // This ensures that if needs_redraw becomes true later,
+                // a frame callback is already in flight or will be requested.
+                if let Some(surface) = state.surface.as_ref() {
+                    if state.frame_callback.is_none() {
+                        let callback = surface.frame(qh, ());
+                        state.frame_callback = Some(callback);
+                        log::trace!("Frame callback requested from wl_callback::Done (no redraw needed)");
+                    }
+                }
+            }
+        } else {
+            log::warn!("Received unexpected event on wl_callback: {:?}", event);
+        }
+    }
+}
+
 impl Dispatch<wl_shm_pool::WlShmPool, ()> for AppState {
     fn event(
         _: &mut Self,
