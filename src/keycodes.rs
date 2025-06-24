@@ -138,7 +138,6 @@ pub fn get_keycode_from_string(key_name_str: &str) -> Result<u32, String> {
         "pagedown" | "pgdn" => Ok(109),
         "insert" | "ins" => Ok(110),
         "delete" | "del" => Ok(111),
-        // "macro" => Ok(112), // Generic, probably not for direct use by name
         "mute" => Ok(113),
         "volumedown" => Ok(114),
         "volumeup" => Ok(115),
@@ -146,11 +145,9 @@ pub fn get_keycode_from_string(key_name_str: &str) -> Result<u32, String> {
         "kpequal" | "keypadequal" => Ok(117),
         "kpplusminus" | "keypadplusminus" => Ok(118),
         "pause" | "pausebreak" => Ok(119),
-        // "scale" => Ok(120), // AL Compiz Scale (Expose) - less common by name
         "kpcomma" | "keypadcomma" => Ok(121), // Often on Brazilian/some European layouts
-        // "hangeul" | "hanguel" => Ok(122), // Korean Hangeul
-        "hanja" => Ok(123), // Korean Hanja
-        "yen" => Ok(124),   // Japanese Yen (sometimes different from Ro)
+        "hanja" => Ok(123),                   // Korean Hanja
+        "yen" => Ok(124),                     // Japanese Yen (sometimes different from Ro)
         "leftmeta" | "lmeta" | "leftwindows" | "lwin" | "leftsuper" | "lsuper" => Ok(125),
         "rightmeta" | "rmeta" | "rightwindows" | "rwin" | "rightsuper" | "rsuper" => Ok(126),
         "compose" => Ok(127), // Compose key
@@ -223,8 +220,6 @@ pub fn get_keycode_from_string(key_name_str: &str) -> Result<u32, String> {
 
         "fn" => Ok(0x1d0),    // 464
         "fnesc" => Ok(0x1d1), // 465
-        // Not adding all KEY_FN_F<N> as they are less common to specify by name
-        // and "f<N>" should cover it.
         _ => Err(format!("Unknown key name: '{}'", key_name_str)),
     }
 }

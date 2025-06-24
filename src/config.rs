@@ -3,7 +3,6 @@ use serde::Deserialize;
 use serde_value::Value as SerdeValue;
 use std::collections::HashMap;
 use std::fs;
-// use std::process; // This was unused
 
 use crate::keycodes;
 
@@ -423,7 +422,6 @@ pub fn simulate_text_layout(
         let ellipsis_width_px = get_ft_text_width(ellipsis, current_font_size_pts, ft_face)?;
 
         while text_width_px > max_text_width_px && !current_text.is_empty() {
-            // let initial_len_before_pop = current_text.chars().count(); // Unused
             current_text.pop();
             truncated_chars = original_text.chars().count() - current_text.chars().count();
 
@@ -459,11 +457,10 @@ pub fn simulate_text_layout(
                 temp_ellipsis.pop();
             }
             current_text = temp_ellipsis;
-            if current_text.starts_with(ellipsis.chars().next().unwrap_or_default())
-                && current_text.len() < ellipsis.len()
+            if (current_text.starts_with(ellipsis.chars().next().unwrap_or_default())
+                && current_text.len() < ellipsis.len())
+                || current_text.is_empty()
             {
-                truncated_chars = original_text.chars().count();
-            } else if current_text.is_empty() {
                 truncated_chars = original_text.chars().count();
             }
         }

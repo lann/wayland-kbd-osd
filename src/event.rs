@@ -5,7 +5,7 @@ use input::event::Event as LibinputEvent;
 use libc::{O_NONBLOCK, O_RDWR};
 use std::fs::OpenOptions;
 use std::os::unix::fs::OpenOptionsExt;
-use std::os::unix::io::OwnedFd; // AsRawFd was unused
+use std::os::unix::io::OwnedFd;
 use std::path::Path;
 
 // Assuming AppState is defined in wayland.rs and passed here
@@ -37,8 +37,6 @@ pub fn handle_libinput_events(app_state: &mut AppState) {
     if let Some(ref mut context) = app_state.input_context {
         if context.dispatch().is_err() {
             log::error!("Libinput dispatch error");
-            // Optionally, you might want to handle this error more robustly,
-            // e.g., by trying to re-initialize libinput or by stopping input handling.
         }
         for event in context.by_ref() {
             if let LibinputEvent::Keyboard(KeyboardEvent::Key(key_event)) = event {

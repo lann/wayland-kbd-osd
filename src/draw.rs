@@ -1,16 +1,8 @@
 // Drawing the keyboard
 
 use cairo::{Context, FontFace as CairoFontFace};
-// FreeTypeLibrary is not directly used here if font face is passed in.
-// use freetype::{Library as FreeTypeLibrary};
 
 use crate::config::parse_color_string; // Only parse_color_string is needed for background
-                                       // KeyConfig was unused here as KeyDisplay is now fully populated by AppState::draw
-                                       // use crate::config::{KeyConfig, parse_color_string, default_key_background_color_string,
-                                       //                     DEFAULT_CORNER_RADIUS_UNSCALED, DEFAULT_BORDER_THICKNESS_UNSCALED,
-                                       //                     DEFAULT_TEXT_SIZE_UNSCALED, DEFAULT_ROTATION_DEGREES};
-                                       // use wayland_client::QueueHandle; // Not directly used here
-                                       // use wayland_client::protocol::wl_shm; // Not directly used here
 
 // Struct to hold key properties for drawing (calculated from KeyConfig and AppState)
 // This struct is prepared by AppState::draw and passed to paint_all_keys
