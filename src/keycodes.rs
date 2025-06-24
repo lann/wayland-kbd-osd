@@ -147,11 +147,10 @@ pub fn get_keycode_from_string(key_name_str: &str) -> Result<u32, String> {
         "kpplusminus" | "keypadplusminus" => Ok(118),
         "pause" | "pausebreak" => Ok(119),
         // "scale" => Ok(120), // AL Compiz Scale (Expose) - less common by name
-
         "kpcomma" | "keypadcomma" => Ok(121), // Often on Brazilian/some European layouts
         // "hangeul" | "hanguel" => Ok(122), // Korean Hangeul
         "hanja" => Ok(123), // Korean Hanja
-        "yen" => Ok(124), // Japanese Yen (sometimes different from Ro)
+        "yen" => Ok(124),   // Japanese Yen (sometimes different from Ro)
         "leftmeta" | "lmeta" | "leftwindows" | "lwin" | "leftsuper" | "lsuper" => Ok(125),
         "rightmeta" | "rmeta" | "rightwindows" | "rwin" | "rightsuper" | "rsuper" => Ok(126),
         "compose" => Ok(127), // Compose key
@@ -160,25 +159,25 @@ pub fn get_keycode_from_string(key_name_str: &str) -> Result<u32, String> {
         "stop" => Ok(128), // AC Stop
         "again" => Ok(129),
         "props" => Ok(130), // AC Properties
-        "undo" => Ok(131), // AC Undo
+        "undo" => Ok(131),  // AC Undo
         "front" => Ok(132),
-        "copy" => Ok(133), // AC Copy
-        "open" => Ok(134), // AC Open
-        "paste" => Ok(135), // AC Paste
-        "find" => Ok(136), // AC Search
-        "cut" => Ok(137), // AC Cut
-        "help" => Ok(138), // AL Integrated Help Center
-        "menu" | "appmenu" => Ok(139), // Menu key (application menu)
+        "copy" => Ok(133),                // AC Copy
+        "open" => Ok(134),                // AC Open
+        "paste" => Ok(135),               // AC Paste
+        "find" => Ok(136),                // AC Search
+        "cut" => Ok(137),                 // AC Cut
+        "help" => Ok(138),                // AL Integrated Help Center
+        "menu" | "appmenu" => Ok(139),    // Menu key (application menu)
         "calc" | "calculator" => Ok(140), // AL Calculator
         "setup" => Ok(141),
-        "sleep" => Ok(142), // SC System Sleep
+        "sleep" => Ok(142),  // SC System Sleep
         "wakeup" => Ok(143), // System Wake Up
-        "file" => Ok(144), // AL Local Machine Browser
-        "www" => Ok(150), // AL Internet Browser
+        "file" => Ok(144),   // AL Local Machine Browser
+        "www" => Ok(150),    // AL Internet Browser
         "mail" => Ok(155),
         "bookmarks" => Ok(156), // AC Bookmarks
         "computer" => Ok(157),
-        "back" => Ok(158), // AC Back
+        "back" => Ok(158),    // AC Back
         "forward" => Ok(159), // AC Forward
         "ejectcd" | "eject" => Ok(161),
         "nextsong" => Ok(163),
@@ -189,8 +188,8 @@ pub fn get_keycode_from_string(key_name_str: &str) -> Result<u32, String> {
         "rewind" => Ok(168),
         "phone" => Ok(169),
         "homepage" => Ok(172), // AC Home
-        "refresh" => Ok(173), // AC Refresh
-        "exit" => Ok(174), // AC Exit
+        "refresh" => Ok(173),  // AC Refresh
+        "exit" => Ok(174),     // AC Exit
         "scrollup" => Ok(177),
         "scrolldown" => Ok(178),
         "kpleftparen" | "keypadleftparen" => Ok(179),
@@ -222,11 +221,10 @@ pub fn get_keycode_from_string(key_name_str: &str) -> Result<u32, String> {
         "kbdillumup" | "keyboardilluminationup" => Ok(230),
         "micmute" => Ok(248),
 
-        "fn" => Ok(0x1d0), // 464
+        "fn" => Ok(0x1d0),    // 464
         "fnesc" => Ok(0x1d1), // 465
         // Not adding all KEY_FN_F<N> as they are less common to specify by name
         // and "f<N>" should cover it.
-
         _ => Err(format!("Unknown key name: '{}'", key_name_str)),
     }
 }
@@ -402,7 +400,6 @@ mod tests {
         assert_eq!(get_keycode_from_string("micmute").unwrap(), 248);
     }
 
-
     #[test]
     fn test_unknown_key() {
         assert!(get_keycode_from_string("thiskeydoesnotexist").is_err());
@@ -438,7 +435,7 @@ mod tests {
             get_keycode_from_string("meta").unwrap_err(),
             "Ambiguous key name 'meta'/'win'/'super'. Please specify one of: leftmeta, rightmeta (or lwin, rwin, etc.)"
         );
-         assert_eq!(
+        assert_eq!(
             get_keycode_from_string("win").unwrap_err(),
             "Ambiguous key name 'meta'/'win'/'super'. Please specify one of: leftmeta, rightmeta (or lwin, rwin, etc.)"
         );

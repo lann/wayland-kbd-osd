@@ -1,1254 +1,47 @@
-use wayland_client::{Connection, Dispatch, QueueHandle, Proxy};
-use wayland_client::protocol::{wl_compositor, wl_shm, wl_shm_pool, wl_surface, wl_buffer, wl_registry, wl_output};
-use wayland_protocols::xdg::shell::client::{xdg_surface, xdg_toplevel, xdg_wm_base};
-use wayland_protocols::xdg::xdg_output::zv1::client::{zxdg_output_manager_v1, zxdg_output_v1};
-use input; // Added for libinput
-
-use std::collections::HashMap; // For storing key states and configs by keycode
-// Serde for TOML deserialization
-use serde::Deserialize;
-use serde_value::Value as SerdeValue; // For flexible keycode parsing
-use std::fs; // For file reading
-use std::process; // For exiting gracefully on config error
-use clap::Parser; // For command-line argument parsing
-use wayland_client::backend::WaylandError; // Added for handle_wayland_events
-use input::event::Event as LibinputEvent; // Added for handle_libinput_events
-use input::event::keyboard::{KeyboardEvent, KeyState, KeyboardEventTrait}; // Added for handle_libinput_events
-
-mod keycodes; // Our new module
-
-// Graphics and Font rendering
-use cairo::{Context, ImageSurface, Format, FontFace as CairoFontFace};
-use freetype::{Library as FreeTypeLibrary};
-
-// Configuration Structs
-
-// Represents a size that can be absolute (pixels) or relative (ratio of screen)
-#[derive(Deserialize, Debug, Clone, Copy)]
-#[serde(untagged)] // Allows parsing "100" as pixels(100) or "0.5" as ratio(0.5)
-enum SizeDimension {
-    Pixels(u32),
-    Ratio(f32),
-}
-
-// Enum for specifying overlay position
-#[derive(Deserialize, Debug, Clone, PartialEq)]
-#[serde(rename_all = "kebab-case")]
-enum OverlayPosition {
-    Top,
-    Bottom,
-    Left,
-    Right,
-    Center,
-    TopLeft,
-    TopCenter,
-    TopRight,
-    BottomLeft,
-    BottomCenter,
-    BottomRight,
-    CenterLeft,
-    CenterRight,
-}
-
-#[derive(Deserialize, Debug, Clone)]
-struct OverlayConfig {
-    #[serde(default)]
-    screen: Option<String>,
-    #[serde(default = "default_overlay_position")]
-    position: OverlayPosition,
-    size_width: Option<SizeDimension>,
-    size_height: Option<SizeDimension>,
-    #[serde(default = "default_overlay_margin")]
-    margin_top: i32,
-    #[serde(default = "default_overlay_margin")]
-    margin_right: i32,
-    #[serde(default = "default_overlay_margin")]
-    margin_bottom: i32,
-    #[serde(default = "default_overlay_margin")]
-    margin_left: i32,
-    #[serde(default = "default_background_color_inactive")]
-    background_color_inactive: String, // Overall background for the overlay window
-    // Note: background_color_active is currently unused for global background, could be removed or repurposed.
-    #[serde(default = "default_background_color_active")]
-    background_color_active: String,
-
-    // Default key appearance (inactive state)
-    #[serde(default = "default_key_background_color_string")]
-    default_key_background_color: String,
-    #[serde(default = "default_key_text_color_string")]
-    default_key_text_color: String,
-    #[serde(default = "default_key_outline_color_string")]
-    default_key_outline_color: String,
-
-    // Active key appearance (pressed state)
-    #[serde(default = "default_active_key_background_color_string")]
-    active_key_background_color: String,
-    #[serde(default = "default_active_key_text_color_string")]
-    active_key_text_color: String,
-    // Active key outline could be added if desired, e.g., active_key_outline_color. For now, it uses default_key_outline_color.
-}
-
-fn default_overlay_position() -> OverlayPosition { OverlayPosition::BottomCenter }
-fn default_overlay_margin() -> i32 { 0 }
-fn default_background_color_inactive() -> String { "#00000000".to_string() } // Fully transparent
-fn default_background_color_active() -> String { "#A0A0A0D0".to_string() } // Slightly more opaque grey (unused for global background)
-
-// New defaults based on requirements:
-// Key background: 50% opaque, 30% gray. 30% gray = 77 (4D). 50% opacity = 128 (80). -> #4D4D4D80
-fn default_key_background_color_string() -> String { "#4D4D4D80".to_string() }
-
-// Key text: 80% opaque, 70% gray. 70% gray = 179 (B3). 80% opacity = 204 (CC). -> #B3B3B3CC
-fn default_key_text_color_string() -> String { "#B3B3B3CC".to_string() }
-
-// Key outline: 80% opaque, 70% gray (same as text). -> #B3B3B3CC
-fn default_key_outline_color_string() -> String { "#B3B3B3CC".to_string() }
-
-// Active key background: Use current pressed color #A0A0F0FF as default.
-fn default_active_key_background_color_string() -> String { "#A0A0F0FF".to_string() }
-
-// Active key text: Default to same as inactive key text, but configurable.
-fn default_active_key_text_color_string() -> String { default_key_text_color_string() }
-
-
-impl Default for OverlayConfig {
-    fn default() -> Self {
-        OverlayConfig {
-            screen: None,
-            position: default_overlay_position(),
-            size_width: None,
-            size_height: Some(SizeDimension::Ratio(0.3)),
-            margin_top: default_overlay_margin(),
-            margin_right: default_overlay_margin(),
-            margin_bottom: default_overlay_margin(),
-            margin_left: default_overlay_margin(),
-            background_color_inactive: default_background_color_inactive(),
-            background_color_active: default_background_color_active(), // Keep for now, though unused
-            default_key_background_color: default_key_background_color_string(),
-            default_key_text_color: default_key_text_color_string(),
-            default_key_outline_color: default_key_outline_color_string(),
-            active_key_background_color: default_active_key_background_color_string(),
-            active_key_text_color: default_active_key_text_color_string(),
-        }
-    }
-}
-
-#[derive(Deserialize, Debug, Clone)]
-struct KeyConfig {
-    name: String,
-    width: f32,
-    height: f32,
-    left: f32,
-    top: f32,
-    #[serde(alias = "keycode")] // Accept "keycode" for initial deserialization
-    raw_keycode: Option<SerdeValue>, // Will hold string or int from TOML, or be None
-    #[serde(skip_deserializing)] // This field is populated after initial deserialization
-    keycode: u32, // The resolved keycode
-    rotation_degrees: Option<f32>, // Optional, defaults to 0 or a global default
-    text_size: Option<f32>,       // Optional, defaults to a global default
-    corner_radius: Option<f32>,   // Optional
-    border_thickness: Option<f32>,// Optional
-    background_color: Option<String>, // Optional per-key background color
-    // Colors could also be strings like "#RRGGBBAA" and parsed later
-    // For now, keeping them simple, assuming they might be added if needed
-    // border_color_hex: Option<String>,
-    // text_color_hex: Option<String>,
-}
-
-#[derive(Deserialize, Debug, Clone)]
-struct AppConfig {
-    #[serde(default)]
-    key: Vec<KeyConfig>,
-    #[serde(default)]
-    overlay: OverlayConfig, // Add the new overlay configuration
-}
-
-// Helper function to parse color string like "#RRGGBBAA" or "#RGB"
-// Returns (r, g, b, a) tuple with values from 0.0 to 1.0
-fn parse_color_string(color_str: &str) -> Result<(f64, f64, f64, f64), String> {
-    let s = color_str.trim_start_matches('#');
-    match s.len() {
-        6 => { // RRGGBB
-            let r = u8::from_str_radix(&s[0..2], 16).map_err(|e| format!("Invalid hex for R: {}", e))?;
-            let g = u8::from_str_radix(&s[2..4], 16).map_err(|e| format!("Invalid hex for G: {}", e))?;
-            let b = u8::from_str_radix(&s[4..6], 16).map_err(|e| format!("Invalid hex for B: {}", e))?;
-            Ok((r as f64 / 255.0, g as f64 / 255.0, b as f64 / 255.0, 1.0)) // Default alpha to 1.0
-        }
-        8 => { // RRGGBBAA
-            let r = u8::from_str_radix(&s[0..2], 16).map_err(|e| format!("Invalid hex for R: {}", e))?;
-            let g = u8::from_str_radix(&s[2..4], 16).map_err(|e| format!("Invalid hex for G: {}", e))?;
-            let b = u8::from_str_radix(&s[4..6], 16).map_err(|e| format!("Invalid hex for B: {}", e))?;
-            let a = u8::from_str_radix(&s[6..8], 16).map_err(|e| format!("Invalid hex for A: {}", e))?;
-            Ok((r as f64 / 255.0, g as f64 / 255.0, b as f64 / 255.0, a as f64 / 255.0))
-        }
-        3 => { // RGB
-            let r_char = s.chars().nth(0).unwrap();
-            let g_char = s.chars().nth(1).unwrap();
-            let b_char = s.chars().nth(2).unwrap();
-            let r = u8::from_str_radix(&format!("{}{}", r_char, r_char), 16).map_err(|e| format!("Invalid hex for R: {}", e))?;
-            let g = u8::from_str_radix(&format!("{}{}", g_char, g_char), 16).map_err(|e| format!("Invalid hex for G: {}", e))?;
-            let b = u8::from_str_radix(&format!("{}{}", b_char, b_char), 16).map_err(|e| format!("Invalid hex for B: {}", e))?;
-            Ok((r as f64 / 255.0, g as f64 / 255.0, b as f64 / 255.0, 1.0))
-        }
-        4 => { // RGBA
-            let r_char = s.chars().nth(0).unwrap();
-            let g_char = s.chars().nth(1).unwrap();
-            let b_char = s.chars().nth(2).unwrap();
-            let a_char = s.chars().nth(3).unwrap();
-            let r = u8::from_str_radix(&format!("{}{}", r_char, r_char), 16).map_err(|e| format!("Invalid hex for R: {}", e))?;
-            let g = u8::from_str_radix(&format!("{}{}", g_char, g_char), 16).map_err(|e| format!("Invalid hex for G: {}", e))?;
-            let b = u8::from_str_radix(&format!("{}{}", b_char, b_char), 16).map_err(|e| format!("Invalid hex for B: {}", e))?;
-            let a = u8::from_str_radix(&format!("{}{}", a_char, a_char), 16).map_err(|e| format!("Invalid hex for A: {}", e))?;
-            Ok((r as f64 / 255.0, g as f64 / 255.0, b as f64 / 255.0, a as f64 / 255.0))
-        }
-        _ => Err(format!("Invalid color string length for '{}'. Expected #RRGGBB, #RRGGBBAA, #RGB, or #RGBA", color_str)),
-    }
-}
-
-// Struct to hold key properties for drawing
-struct KeyDisplay {
-    text: String,
-    center_x: f32,
-    center_y: f32,
-    width: f32,
-    height: f32,
-    corner_radius: f32,
-    border_thickness: f32,
-    rotation_degrees: f32,
-    text_size: f32,
-    // Colors are now (R, G, B, A) tuples with values from 0.0 to 1.0
-    border_color: (f64, f64, f64, f64),
-    background_color: (f64, f64, f64, f64),
-    text_color: (f64, f64, f64, f64),
-}
-
-// fn draw_single_key( // This function will be rewritten for Cairo
-//     dt: &mut raqote::DrawTarget,
-//     key: &KeyDisplay,
-//     font: &Font<'_>
-// ) {
-    // ... old raqote implementation ...
-// New function using Cairo
-fn draw_single_key_cairo(
-    ctx: &Context,
-    key: &KeyDisplay,
-) {
-    let x = key.center_x as f64;
-    let y = key.center_y as f64;
-    let width = key.width as f64;
-    let height = key.height as f64;
-    let corner_radius = key.corner_radius as f64;
-    let border_thickness = key.border_thickness as f64;
-    let rotation_radians = key.rotation_degrees.to_radians() as f64;
-
-    ctx.save().expect("Failed to save cairo context state");
-
-    // Set up transformation: translate to key center, rotate, then translate to top-left of key bounding box
-    ctx.translate(x, y);
-    ctx.rotate(rotation_radians);
-    ctx.translate(-width / 2.0, -height / 2.0);
-
-    // Draw rounded rectangle path
-    // Cairo's `arc` is clockwise. `arc_negative` is counter-clockwise.
-    // Angles are in radians. 0 is east, PI/2 is south, PI is west, 3*PI/2 is north.
-    ctx.new_sub_path();
-    ctx.arc(width - corner_radius, corner_radius, corner_radius, -std::f64::consts::PI / 2.0, 0.0); // Top-right corner
-    ctx.arc(width - corner_radius, height - corner_radius, corner_radius, 0.0, std::f64::consts::PI / 2.0); // Bottom-right corner
-    ctx.arc(corner_radius, height - corner_radius, corner_radius, std::f64::consts::PI / 2.0, std::f64::consts::PI); // Bottom-left corner
-    ctx.arc(corner_radius, corner_radius, corner_radius, std::f64::consts::PI, 3.0 * std::f64::consts::PI / 2.0); // Top-left corner
-    ctx.close_path();
-
-    // Fill
-    let (r, g, b, a) = key.background_color;
-    ctx.set_source_rgba(r, g, b, a);
-    ctx.fill_preserve().expect("Cairo fill failed"); // Use fill_preserve to keep path for stroke
-
-    // Stroke
-    let (r, g, b, a) = key.border_color;
-    ctx.set_source_rgba(r, g, b, a);
-    ctx.set_line_width(border_thickness);
-    ctx.stroke().expect("Cairo stroke failed");
-
-    // Text drawing
-    let (r, g, b, a) = key.text_color;
-    ctx.set_source_rgba(r, g, b, a);
-
-    // --- Text Scaling and Truncation Logic ---
-    // This section attempts to fit the key's text within its bounds.
-    // It involves two main strategies:
-    // 1. Font Size Scaling: Reduce font size iteratively until text fits or min font size is reached.
-    // 2. Text Truncation: If scaling isn't enough, remove characters from the end and append "..."
-
-    let mut current_text = key.text.clone();
-    let mut current_font_size = key.text_size as f64;
-    ctx.set_font_size(current_font_size); // Set initial font size
-
-    // Define text area constraints based on key dimensions and padding.
-    // Padding is a small percentage of the key's width/height, with a minimum pixel value.
-    let text_padding = (key.width * 0.1).min(key.height * 0.1).max(2.0) as f64;
-    let max_text_width = width - 2.0 * text_padding; // Available width for text inside padding
-    // let max_text_height = height - 2.0 * text_padding; // Max height could also be a constraint if needed
-
-    let original_font_size = key.text_size as f64;
-    // Define a minimum sensible font size: 50% of original, but not less than 6.0 points.
-    let min_font_size = (original_font_size * 0.5).max(6.0);
-
-    let mut text_extents = ctx.text_extents(&current_text).expect("Failed to get text extents (initial)");
-
-    // --- Stage 1: Font Size Scaling ---
-    // Iteratively reduce font size if the current text width exceeds the maximum allowed width.
-    // Stop if text fits, or if the font size reaches the defined minimum.
-    while text_extents.width() > max_text_width && current_font_size > min_font_size {
-        current_font_size *= 0.9; // Reduce font size by 10%
-        if current_font_size < min_font_size {
-            current_font_size = min_font_size; // Clamp to minimum font size
-        }
-        ctx.set_font_size(current_font_size); // Apply new font size to context
-        text_extents = ctx.text_extents(&current_text).expect("Failed to get text extents (scaling)");
-
-        // If even at minimum font size the text is too wide, break and proceed to truncation.
-        if current_font_size == min_font_size && text_extents.width() > max_text_width {
-            break;
-        }
-    }
-
-    // --- Stage 2: Text Truncation ---
-    // If, after font scaling, the text is still too wide, truncate it.
-    if text_extents.width() > max_text_width {
-        let ellipsis = "...";
-        let ellipsis_extents = ctx.text_extents(ellipsis).expect("Failed to get ellipsis extents");
-        // Calculate the maximum width available for the text part when an ellipsis is present.
-        let max_width_for_text_with_ellipsis = max_text_width - ellipsis_extents.width();
-
-        // Iteratively remove characters from the end of `current_text`.
-        while text_extents.width() > max_text_width && !current_text.is_empty() {
-            if current_text.pop().is_none() { // Remove the last character
-                break; // Should not happen due to !current_text.is_empty() check, but good for safety.
-            }
-
-            // Form a temporary string with the current (shortened) text plus ellipsis.
-            let temp_text_with_ellipsis = if current_text.is_empty() {
-                // If all original text is removed, show ellipsis if it fits, otherwise empty string.
-                if ellipsis_extents.width() <= max_text_width { ellipsis.to_string() } else { "".to_string() }
-            } else {
-                format!("{}{}", current_text, ellipsis)
-            };
-
-            // Measure the new temporary string.
-            text_extents = ctx.text_extents(&temp_text_with_ellipsis).expect("Failed to get text extents (truncating)");
-
-            // Check if the actual text part (without ellipsis) now fits within its allocated space.
-            let current_text_only_extents = ctx.text_extents(&current_text).expect("Failed to get current_text extents");
-            if current_text_only_extents.width() <= max_width_for_text_with_ellipsis || current_text.is_empty() {
-                 current_text = temp_text_with_ellipsis; // Adopt the text with ellipsis
-                 text_extents = ctx.text_extents(&current_text).expect("Failed to get final truncated text extents");
-                 break; // Text with ellipsis fits, or text is empty.
-            }
-        }
-
-        // --- Stage 2b: Final Ellipsis Fit Check ---
-        // After truncation loop, if `current_text` (which might include "...") is still too wide,
-        // it means even the shortest version of `text...` didn't fit.
-        // Try to fit just the ellipsis, then shorter versions ("..", "."), then empty string.
-        if text_extents.width() > max_text_width {
-            if ellipsis_extents.width() <= max_text_width { // Can full "..." fit?
-                current_text = ellipsis.to_string();
-            } else if ctx.text_extents("..").unwrap().width() <= max_text_width { // Can ".." fit?
-                current_text = "..".to_string();
-            } else if ctx.text_extents(".").unwrap().width() <= max_text_width { // Can "." fit?
-                current_text = ".".to_string();
-            } else { // Nothing fits.
-                current_text = "".to_string();
-            }
-            // text_extents = ctx.text_extents(&current_text).expect("Failed to get text extents (final truncation check)"); // Recalculate if needed, but current_text is final.
-        }
-    }
-    // --- End of Text Scaling and Truncation ---
-
-    // Recalculate text_extents with the final potentially scaled/truncated text and font size.
-    // ctx.set_font_size(current_font_size); // Font size is already set correctly from scaling/truncation phase.
-    let text_extents = ctx.text_extents(&current_text).expect("Failed to get text extents (final)");
-
-
-    // Calculate text position to center it
-    let text_x = (width - text_extents.width()) / 2.0 - text_extents.x_bearing();
-    let text_y = (height - text_extents.height()) / 2.0 - text_extents.y_bearing();
-
-    ctx.move_to(text_x, text_y);
-    ctx.show_text(&current_text).expect("Cairo show_text failed");
-
-    ctx.restore().expect("Failed to restore cairo context state");
-}
-
-use std::os::unix::io::{AsRawFd, OwnedFd};
-use std::os::unix::fs::OpenOptionsExt;
-use std::fs::OpenOptions;
-use std::path::Path;
-use libc::{O_RDWR, O_NONBLOCK};
-
-use memmap2::MmapMut;
-
-const WINDOW_WIDTH: i32 = 320;
-const WINDOW_HEIGHT: i32 = 240;
-
-struct MyLibinputInterface;
-
-impl input::LibinputInterface for MyLibinputInterface {
-    fn open_restricted(&mut self, path: &Path, flags: i32) -> Result<OwnedFd, i32> {
-        log::debug!("Opening path: {:?}, flags: {}", path, flags);
-        OpenOptions::new()
-            .custom_flags(O_RDWR | O_NONBLOCK)
-            .read(true)
-            .write(true)
-            .open(path)
-            .map(|file| file.into())
-            .map_err(|e| {
-                log::error!("Failed to open path {:?}: {}", path, e);
-                e.raw_os_error().unwrap_or(libc::EIO)
-            })
-    }
-    fn close_restricted(&mut self, fd: OwnedFd) {
-        drop(fd);
-        log::debug!("Closed device via OwnedFd drop");
-    }
-}
-
-// Struct to hold output information
-#[derive(Debug, Clone, Default)]
-struct OutputInfo {
-    name: Option<String>,
-    description: Option<String>,
-    logical_width: i32,
-    logical_height: i32,
-    // Add other fields like scale factor if needed later
-}
-
-
-// Dispatcher for zwlr_layer_surface_v1
-impl Dispatch<zwlr_layer_surface_v1::ZwlrLayerSurfaceV1, ()> for AppState {
-    fn event(
-        state: &mut AppState,
-        layer_surface: &zwlr_layer_surface_v1::ZwlrLayerSurfaceV1,
-        event: zwlr_layer_surface_v1::Event,
-        _data: &(),
-        _conn: &Connection,
-        qh: &QueueHandle<AppState>,
-    ) {
-        match event {
-            zwlr_layer_surface_v1::Event::Configure { serial, width, height } => {
-                log::info!(
-                    "LayerSurface Configure: serial: {}, width: {}, height: {}",
-                    serial, width, height
-                );
-                // Update size if compositor suggests a new one and it's not zero
-                if width > 0 { state.configured_width = width as i32; }
-                if height > 0 { state.configured_height = height as i32; }
-
-                // Client must ack the configure
-                layer_surface.ack_configure(serial);
-
-                // Mark that a redraw is needed due to potential size change
-                state.needs_redraw = true;
-                // Explicitly draw if the surface is configured and ready
-                if state.surface.is_some() {
-                     log::debug!("LayerSurface Configure event: triggering draw and setting needs_redraw to false.");
-                     state.draw(qh); // Draw immediately
-                     state.needs_redraw = false; // Reset as draw was just called
-                }
-            }
-            zwlr_layer_surface_v1::Event::Closed => {
-                log::info!("LayerSurface Closed event received. Application will exit.");
-                state.running = false; // Signal the main loop to stop
-            }
-            _ => {
-                log::trace!("Unhandled zwlr_layer_surface_v1 event: {:?}", event);
-            }
-        }
-    }
-}
-
-struct AppState {
-    compositor: Option<wl_compositor::WlCompositor>,
-    shm: Option<wl_shm::WlShm>,
-    xdg_wm_base: Option<xdg_wm_base::XdgWmBase>,
-    layer_shell: Option<zwlr_layer_shell_v1::ZwlrLayerShellV1>,
-    xdg_output_manager: Option<zxdg_output_manager_v1::ZxdgOutputManagerV1>,
-    outputs: Vec<(u32, wl_output::WlOutput, Option<zxdg_output_v1::ZxdgOutputV1>, OutputInfo)>, // Store (name, output_obj, xdg_output_obj, info)
-    surface: Option<wl_surface::WlSurface>,
-    layer_surface: Option<zwlr_layer_surface_v1::ZwlrLayerSurfaceV1>,
-    buffer: Option<wl_buffer::WlBuffer>,
-    mmap: Option<MmapMut>,
-    temp_file: Option<std::fs::File>, // Added for persistent temp file
-    configured_width: i32,
-    configured_height: i32,
-    running: bool, // Added to control the main loop
-    input_context: Option<input::Libinput>,
-    config: AppConfig,               // Store loaded configuration
-    key_states: HashMap<u32, bool>,  // Stores pressed state for each configured keycode
-    needs_redraw: bool, // Added to manage redraw logic globally
-
-    // Cache for layout calculations
-    last_draw_width: i32,
-    last_draw_height: i32,
-    cached_scale: f32,
-    cached_offset_x: f32,
-    cached_offset_y: f32,
-    layout_cache_valid: bool,
-    initial_surface_size_set: bool, // Added for deferred sizing
-    target_output_identifier: Option<String>, // Stores name or index of the desired output
-    // We'll use a Option<u32> to store the actual wl_output name (registry global id) once identified
-    identified_target_wl_output_name: Option<u32>,
-}
-
-impl AppState {
-    fn new(app_config: AppConfig) -> Self {
-        let mut key_states_map = HashMap::new();
-        for key_conf in app_config.key.iter() {
-            key_states_map.insert(key_conf.keycode, false);
-        }
-
-        AppState {
-            compositor: None,
-            shm: None,
-            xdg_wm_base: None,
-            layer_shell: None,
-            xdg_output_manager: None,
-            outputs: Vec::new(),
-            surface: None,
-            layer_surface: None,
-            buffer: None,
-            mmap: None,
-            temp_file: None,
-            configured_width: WINDOW_WIDTH, // Initial fallback, will be updated
-            configured_height: WINDOW_HEIGHT, // Initial fallback, will be updated
-            running: true,
-            input_context: None,
-            config: app_config.clone(), // Clone AppConfig for AppState
-            key_states: key_states_map,
-            needs_redraw: true, // Start with true to ensure initial draw
-
-            last_draw_width: 0,
-            last_draw_height: 0,
-            cached_scale: 1.0,
-            cached_offset_x: 0.0,
-            cached_offset_y: 0.0,
-            layout_cache_valid: false,
-            initial_surface_size_set: false,
-            target_output_identifier: app_config.overlay.screen.clone(), // Store configured screen specifier
-            identified_target_wl_output_name: None,
-        }
-    }
-
-    // Method to configure layer surface size once dimensions are known
-    fn attempt_configure_layer_surface_size(&mut self) { // Removed qh
-        if self.initial_surface_size_set || self.layer_surface.is_none() || self.surface.is_none() {
-            return; // Already set, or layer surface not ready
-        }
-
-        let mut screen_width_px = WINDOW_WIDTH; // Default if no output info
-        let mut screen_height_px = WINDOW_HEIGHT; // Default if no output info
-        let mut found_target_output_dimensions = false;
-
-        if let Some(target_wl_name) = self.identified_target_wl_output_name {
-            // A specific output was identified earlier
-            if let Some((_, _, _, info)) = self.outputs.iter().find(|(name, _, _, _)| *name == target_wl_name) {
-                if info.logical_width > 0 && info.logical_height > 0 {
-                    screen_width_px = info.logical_width;
-                    screen_height_px = info.logical_height;
-                    found_target_output_dimensions = true;
-                    log::info!("Using dimensions from explicitly targeted output (ID: {} Name: {:?}): {}x{}", target_wl_name, info.name.as_deref().unwrap_or("N/A"), screen_width_px, screen_height_px);
-                } else {
-                    log::warn!("Targeted output (ID: {}) found, but logical dimensions are not yet valid ({}x{}). Waiting.", target_wl_name, info.logical_width, info.logical_height);
-                    return; // Dimensions for target not ready yet
-                }
-            } else {
-                 log::warn!("Previously identified target output (ID: {}) no longer found in outputs list. This should not happen.", target_wl_name);
-                 // Proceed with fallback or first available, but this is unexpected.
-            }
-        }
-
-        if !found_target_output_dimensions {
-            // No specific target was identified, or it was lost. Try the first available output with valid dimensions.
-            if let Some((output_registry_name, _, _, info)) = self.outputs.iter().find(|(_,_,_,i)| i.logical_width > 0 && i.logical_height > 0) {
-                screen_width_px = info.logical_width;
-                screen_height_px = info.logical_height;
-                log::info!("Using first available screen with valid dimensions (ID: {}, Name: {:?}): {}x{}", output_registry_name, info.name.as_deref().unwrap_or("N/A"), screen_width_px, screen_height_px);
-                // If no target was specified, we can consider this one the target now for logging consistency.
-                if self.identified_target_wl_output_name.is_none() {
-                    self.identified_target_wl_output_name = Some(*output_registry_name);
-                }
-            } else {
-                log::warn!("No screen with valid logical dimensions found. Falling back to default {}x{} for overlay size calculation.", screen_width_px, screen_height_px);
-                // We might still proceed with fallback if this is the best we can do after some attempts.
-                // For now, if no output has dimensions, we simply return and wait for more events.
-                // This prevents premature sizing with fallbacks if dimensions are merely delayed.
-                // Only if all hope is lost (e.g. after a timeout in main loop) should we use hardcoded fallback.
-                // However, the test expects a fallback if the loop finishes, so we might need to allow it here.
-                // Let's allow fallback for now if no valid screen is found *at this point*.
-            }
-        }
-
-        let (layout_bound_w, layout_bound_h) = self.get_key_layout_bounds();
-        let layout_aspect_ratio = if layout_bound_h > 0.0 { layout_bound_w / layout_bound_h } else { 16.0/9.0 };
-
-        let mut target_w: u32 = 0;
-        let mut target_h: u32 = 0;
-
-        match self.config.overlay.size_width {
-            Some(SizeDimension::Pixels(px)) => target_w = px,
-            Some(SizeDimension::Ratio(r)) => target_w = (screen_width_px as f32 * r).round() as u32,
-            None => {}
-        }
-        match self.config.overlay.size_height {
-            Some(SizeDimension::Pixels(px)) => target_h = px,
-            Some(SizeDimension::Ratio(r)) => target_h = (screen_height_px as f32 * r).round() as u32,
-            None => {}
-        }
-
-        if target_w > 0 && target_h == 0 {
-            if layout_aspect_ratio > 0.0 { target_h = (target_w as f32 / layout_aspect_ratio).round() as u32; }
-            else { target_h = (target_w as f32 * (9.0/16.0)).round() as u32; }
-        } else if target_h > 0 && target_w == 0 {
-            if layout_aspect_ratio > 0.0 { target_w = (target_h as f32 * layout_aspect_ratio).round() as u32; }
-            else { target_w = (target_h as f32 * (16.0/9.0)).round() as u32; }
-        } else if target_w == 0 && target_h == 0 {
-            target_h = (screen_height_px as f32 * 0.3).round() as u32; // Default from OverlayConfig
-            if layout_aspect_ratio > 0.0 { target_w = (target_h as f32 * layout_aspect_ratio).round() as u32; }
-            else { target_w = (screen_width_px as f32 * 0.5).round() as u32; }
-            log::warn!("Overlay size was 0x0. Defaulting to {}x{}.", target_w, target_h);
-        }
-
-        if target_w > screen_width_px as u32 && screen_width_px > 0 {
-            let original_target_w = target_w; target_w = screen_width_px as u32;
-            if layout_aspect_ratio > 0.0 { target_h = (target_w as f32 / layout_aspect_ratio).round() as u32; }
-            log::info!("Target width {} exceeded screen width {}. Adjusted to {}x{} to fit screen width.", original_target_w, screen_width_px, target_w, target_h);
-        }
-        if target_h > screen_height_px as u32 && screen_height_px > 0 {
-            let original_target_h = target_h; target_h = screen_height_px as u32;
-            if layout_aspect_ratio > 0.0 { target_w = (target_h as f32 * layout_aspect_ratio).round() as u32; }
-            log::info!("Target height {} exceeded screen height {}. Adjusted to {}x{} to fit screen height.", original_target_h, screen_height_px, target_w, target_h);
-        }
-
-        // Ensure minimum size if calculations result in zero, but screen dimensions are valid
-        if target_w == 0 && screen_width_px > 0 { target_w = (screen_width_px as f32 * 0.1).round().max(1.0) as u32; }
-        if target_h == 0 && screen_height_px > 0 { target_h = (screen_height_px as f32 * 0.1).round().max(1.0) as u32; }
-        // If screen dimensions themselves are zero (e.g. headless without proper setup), use small absolute minimum.
-        if target_w == 0 {target_w = 100;}
-        if target_h == 0 {target_h = 50;}
-
-
-        log::info!("Attempting to set layer surface size to: {}x{}", target_w, target_h);
-        if let Some(ls) = self.layer_surface.as_ref() {
-            ls.set_size(target_w, target_h);
-            self.initial_surface_size_set = true;
-            // Surface commit is important to apply changes
-            if let Some(s) = self.surface.as_ref() {
-                s.commit();
-                log::info!("Layer surface size set and surface committed.");
-            } else {
-                log::error!("Cannot commit surface for layer size, surface is None.");
-            }
-            // The compositor should send a ::Configure event, which will trigger a draw.
-            // We might need to explicitly mark needs_redraw = true if configure doesn't always follow set_size immediately.
-            self.needs_redraw = true;
-        } else {
-            log::error!("Cannot set layer surface size, layer_surface is None.");
-        }
-    }
-
-    // Calculates the bounding box of the raw key layout from the config.
-    // Returns (width, height) of the layout in abstract units.
-    // Returns (0.0, 0.0) if no keys are configured.
-    fn get_key_layout_bounds(&self) -> (f32, f32) {
-        if self.config.key.is_empty() {
-            return (0.0, 0.0);
-        }
-
-        let mut min_coord_x = f32::MAX;
-        let mut max_coord_x = f32::MIN;
-        let mut min_coord_y = f32::MAX;
-        let mut max_coord_y = f32::MIN;
-
-        for key_config in &self.config.key {
-            min_coord_x = min_coord_x.min(key_config.left);
-            max_coord_x = max_coord_x.max(key_config.left + key_config.width);
-            min_coord_y = min_coord_y.min(key_config.top);
-            max_coord_y = max_coord_y.max(key_config.top + key_config.height);
-        }
-
-        let layout_width = max_coord_x - min_coord_x;
-        let layout_height = max_coord_y - min_coord_y;
-        (layout_width.max(0.0), layout_height.max(0.0))
-    }
-
-    fn draw(&mut self, qh: &QueueHandle<AppState>) {
-        if self.surface.is_none() || self.shm.is_none() || self.compositor.is_none() {
-            log::error!("Cannot draw: missing essential Wayland objects.");
-            return;
-        }
-
-        let surface = self.surface.as_ref().unwrap();
-        let shm = self.shm.as_ref().unwrap();
-
-        let width = self.configured_width;
-        let height = self.configured_height;
-        let stride = width * 4;
-        let size = (stride * height) as usize;
-
-        // Ensure temp_file and mmap are initialized or resized if necessary
-        let needs_recreation = self.temp_file.is_none() || self.mmap.is_none() ||
-                               match self.mmap.as_ref() {
-                                   Some(m) => m.len() < size,
-                                   None => true, // Should be caught by self.mmap.is_none()
-                               };
-
-        if needs_recreation {
-            if let Some(buffer) = self.buffer.take() {
-                buffer.destroy();
-            }
-            self.mmap = None; // Drop the old mmap before the file is potentially truncated/resized
-            self.temp_file = None; // Drop the old file
-
-            let shm_temp_file = tempfile::tempfile().expect("Failed to create temp file for SHM");
-            shm_temp_file.set_len(size as u64).expect("Failed to set SHM temp file length");
-            self.mmap = Some(unsafe { MmapMut::map_mut(&shm_temp_file).expect("Failed to map SHM temp file") });
-            self.temp_file = Some(shm_temp_file);
-        }
-
-        // self.mmap is guaranteed to be Some by the logic above.
-        // let mmap = self.mmap.as_mut().unwrap(); // This variable was unused, mmap_data below is used.
-        let shm_temp_file_fd = self.temp_file.as_ref().unwrap().as_raw_fd();
-
-        // Create a new pool and buffer for each draw. This is typical.
-        let pool = shm.create_pool(shm_temp_file_fd, size as i32, qh, ());
-        let buffer = pool.create_buffer(0, width, height, stride, wl_shm::Format::Argb8888, qh, ());
-        pool.destroy(); // Pool can be destroyed after buffer creation
-
-        // Get a mutable pointer to the mmap data for Cairo.
-        // This is unsafe because we are responsible for ensuring the data outlives the surface.
-        // In this case, the surface (`cairo_surface`) is local to this `draw` method,
-        // and `self.mmap` (the source of the data) outlives this method.
-        let mmap_ptr = self.mmap.as_mut().unwrap().as_mut_ptr();
-
-        let cairo_surface = match unsafe {
-            ImageSurface::create_for_data_unsafe(
-                mmap_ptr,           // Raw pointer to the data
-                Format::ARgb32,     // Corresponds to wl_shm::Format::Argb8888
-                width,
-                height,
-                stride,
-            )
-        } {
-            Ok(s) => s,
-            Err(e) => {
-                log::error!("Failed to create Cairo ImageSurface from mmap data (unsafe): {:?}", e);
-                surface.attach(Some(&buffer), 0, 0);
-                surface.damage_buffer(0, 0, width, height);
-                surface.commit();
-                if let Some(old_buffer) = self.buffer.replace(buffer) {
-                    old_buffer.destroy();
-                }
-                return;
-            }
-        };
-
-        let ctx = Context::new(&cairo_surface).expect("Failed to create Cairo Context");
-
-        // Clear the surface with configured background color
-        let bg_color_str = &self.config.overlay.background_color_inactive;
-        match parse_color_string(bg_color_str) {
-            Ok((r, g, b, a)) => {
-                ctx.save().unwrap();
-                ctx.set_source_rgba(r, g, b, a);
-                ctx.set_operator(cairo::Operator::Source); // Replace content
-                ctx.paint().expect("Cairo paint (clear) failed");
-                ctx.restore().unwrap();
-            }
-            Err(e) => {
-                log::error!("Failed to parse background_color_inactive '{}': {}. Using default transparent.", bg_color_str, e);
-                // Fallback to default transparent clear if parsing fails
-                ctx.save().unwrap();
-                ctx.set_source_rgba(0.0, 0.0, 0.0, 0.0);
-                ctx.set_operator(cairo::Operator::Source);
-                ctx.paint().expect("Cairo paint (clear fallback) failed");
-                ctx.restore().unwrap();
-            }
-        }
-
-        let scale: f32;
-        let offset_x: f32;
-        let offset_y: f32;
-
-        if self.config.key.is_empty() {
-            log::warn!("No keys configured. Nothing to draw.");
-            surface.attach(Some(&buffer), 0, 0);
-            surface.damage_buffer(0, 0, width, height);
-            surface.commit();
-            self.buffer = Some(buffer);
-            return;
-        }
-
-        // Check if layout parameters can be reused from cache
-        if self.layout_cache_valid && self.configured_width == self.last_draw_width && self.configured_height == self.last_draw_height {
-            scale = self.cached_scale;
-            offset_x = self.cached_offset_x;
-            offset_y = self.cached_offset_y;
-            log::trace!("Using cached layout parameters: scale={}, offset_x={}, offset_y={}", scale, offset_x, offset_y);
-        } else {
-            log::trace!("Recalculating layout parameters. Cache invalid or dimensions changed.");
-            let mut min_coord_x = f32::MAX;
-            let mut max_coord_x = f32::MIN;
-            let mut min_coord_y = f32::MAX;
-            let mut max_coord_y = f32::MIN;
-
-            for key_config in &self.config.key {
-                min_coord_x = min_coord_x.min(key_config.left);
-                max_coord_x = max_coord_x.max(key_config.left + key_config.width);
-                min_coord_y = min_coord_y.min(key_config.top);
-                max_coord_y = max_coord_y.max(key_config.top + key_config.height);
-            }
-
-            let layout_width = max_coord_x - min_coord_x;
-            let layout_height = max_coord_y - min_coord_y;
-
-            // Adjust padding: minimal if overlay size is configured, else dynamic.
-            let padding = if self.config.overlay.size_width.is_some() || self.config.overlay.size_height.is_some() {
-                2.0 // Minimal padding when size is explicitly configured
-            } else {
-                (width.min(height) as f32 * 0.05).max(5.0) // Original dynamic padding
-            };
-            log::trace!("Using padding: {}", padding);
-
-            let drawable_width = (width as f32 - 2.0 * padding).max(0.0); // Ensure non-negative
-            let drawable_height = (height as f32 - 2.0 * padding).max(0.0); // Ensure non-negative
-
-            let current_scale_x = if layout_width > 0.0 { drawable_width / layout_width } else { 1.0 };
-            let current_scale_y = if layout_height > 0.0 { drawable_height / layout_height } else { 1.0 };
-            scale = current_scale_x.min(current_scale_y).max(0.01);
-
-            let scaled_layout_width = layout_width * scale;
-            let scaled_layout_height = layout_height * scale;
-            offset_x = padding + (drawable_width - scaled_layout_width) / 2.0 - (min_coord_x * scale);
-            offset_y = padding + (drawable_height - scaled_layout_height) / 2.0 - (min_coord_y * scale);
-
-            // Update cache
-            self.cached_scale = scale;
-            self.cached_offset_x = offset_x;
-            self.cached_offset_y = offset_y;
-            self.last_draw_width = self.configured_width;
-            self.last_draw_height = self.configured_height;
-            self.layout_cache_valid = true;
-            log::trace!("Updated layout cache: scale={}, offset_x={}, offset_y={}", scale, offset_x, offset_y);
-        }
-
-        let font_data: &[u8] = include_bytes!("../default-font/DejaVuSansMono.ttf");
-        let ft_library = FreeTypeLibrary::init().expect("Failed to init FreeType library");
-        let ft_face = ft_library.new_memory_face(font_data.to_vec(), 0).expect("Failed to load font from memory");
-        // We might want to set char size here on ft_face if needed, e.g., ft_face.set_pixel_sizes(0, 32)
-        // However, Cairo's context.set_font_size() is usually preferred.
-        // Note: create_from_ft might require specific freetype features enabled in cairo-rs or specific versions.
-        // If this exact method name is wrong for cairo-rs 0.19 + freetype-rs 0.35, it will need adjustment.
-        let cairo_font_face = CairoFontFace::create_from_ft(&ft_face)
-            .expect("Failed to create Cairo font face from FT face");
-
-        // Default appearance values are now global consts.
-        // DEFAULT_CORNER_RADIUS_UNSCALED
-        // DEFAULT_BORDER_THICKNESS_UNSCALED
-        // DEFAULT_ROTATION_DEGREES
-        // DEFAULT_TEXT_SIZE_UNSCALED
-
-        // Parse colors from config. Use fallbacks if parsing fails.
-        let default_fallback_color = (0.1, 0.1, 0.1, 1.0); // Opaque dark gray as a last resort
-
-        let key_outline_color_tuple = parse_color_string(&self.config.overlay.default_key_outline_color)
-            .unwrap_or_else(|e| {
-                log::error!("Failed to parse default_key_outline_color '{}': {}. Using fallback.", &self.config.overlay.default_key_outline_color, e);
-                default_fallback_color
-            });
-
-        let default_key_text_color_tuple = parse_color_string(&self.config.overlay.default_key_text_color)
-            .unwrap_or_else(|e| {
-                log::error!("Failed to parse default_key_text_color '{}': {}. Using fallback.", &self.config.overlay.default_key_text_color, e);
-                default_fallback_color
-            });
-
-        let active_key_bg_color_tuple = parse_color_string(&self.config.overlay.active_key_background_color)
-            .unwrap_or_else(|e| {
-                log::error!("Failed to parse active_key_background_color '{}': {}. Using fallback.", &self.config.overlay.active_key_background_color, e);
-                // Fallback for active key bg might be a visually distinct color
-                (0.6, 0.6, 0.9, 1.0) // Opaque light purplish blue
-            });
-
-        let active_key_text_color_tuple = parse_color_string(&self.config.overlay.active_key_text_color)
-            .unwrap_or_else(|e| {
-                log::error!("Failed to parse active_key_text_color '{}': {}. Using fallback.", &self.config.overlay.active_key_text_color, e);
-                default_key_text_color_tuple // Fallback to default key text color if active one fails
-            });
-
-        // Fallback for inactive key background if both per-key and global default fail parsing.
-        // This uses the new default_key_background_color_string() which is #4D4D4D80
-        let ultimate_inactive_key_bg_fallback_tuple = parse_color_string(&default_key_background_color_string())
-            .unwrap_or_else(|_| (0.3, 0.3, 0.3, 0.5)); // Should not fail, but as a code fallback.
-
-        let mut keys_to_draw: Vec<KeyDisplay> = Vec::new();
-
-        for key_config in &self.config.key {
-            let is_pressed = *self.key_states.get(&key_config.keycode).unwrap_or(&false);
-
-            let current_bg_color_tuple = if is_pressed {
-                active_key_bg_color_tuple
-            } else {
-                // Determine inactive background color based on priority
-                // 1. Per-key config
-                // 2. Global overlay config (default_key_background_color)
-                // 3. Hardcoded ultimate fallback (derived from default_key_background_color_string())
-                key_config.background_color.as_ref()
-                    .and_then(|per_key_color_str| {
-                        match parse_color_string(per_key_color_str) {
-                            Ok(color) => Some(color),
-                            Err(e) => {
-                                log::error!(
-                                    "Failed to parse per-key background_color string '{}' for key '{}': {}. Trying global default.",
-                                    per_key_color_str, key_config.name, e
-                                );
-                                None // Fall through to global default
-                            }
-                        }
-                    })
-                    .unwrap_or_else(|| {
-                        // No per-key color or it failed parsing, so use global default string for parsing
-                        parse_color_string(&self.config.overlay.default_key_background_color).unwrap_or_else(|e_global| {
-                            log::error!(
-                                "Failed to parse global default_key_background_color string '{}': {}. Using hardcoded ultimate fallback.",
-                                &self.config.overlay.default_key_background_color, e_global
-                            );
-                            ultimate_inactive_key_bg_fallback_tuple
-                        })
-                    })
-            };
-
-            let current_text_color_tuple = if is_pressed {
-                active_key_text_color_tuple
-            } else {
-                default_key_text_color_tuple
-            };
-
-            // Apply scaling and offset
-            // key_config.left and .top are top-left coordinates.
-            // We need to calculate the center for drawing.
-            let final_center_x = (key_config.left + key_config.width / 2.0) * scale + offset_x;
-            let final_center_y = (key_config.top + key_config.height / 2.0) * scale + offset_y;
-            let final_width = key_config.width * scale;
-            let final_height = key_config.height * scale;
-
-            let final_corner_radius = key_config.corner_radius.unwrap_or(DEFAULT_CORNER_RADIUS_UNSCALED) * scale;
-            let final_border_thickness = key_config.border_thickness.unwrap_or(DEFAULT_BORDER_THICKNESS_UNSCALED) * scale;
-            let final_text_size = key_config.text_size.unwrap_or(DEFAULT_TEXT_SIZE_UNSCALED) * scale;
-            let final_rotation = key_config.rotation_degrees.unwrap_or(DEFAULT_ROTATION_DEGREES);
-
-
-            let key_display = KeyDisplay {
-                text: key_config.name.clone(),
-                center_x: final_center_x,
-                center_y: final_center_y,
-                width: final_width,
-                height: final_height,
-                corner_radius: final_corner_radius,
-                border_thickness: final_border_thickness,
-                rotation_degrees: final_rotation, // Rotation is absolute
-                text_size: final_text_size,
-                border_color: key_outline_color_tuple,     // Use new configurable outline color
-                background_color: current_bg_color_tuple,  // Uses active or inactive logic
-                text_color: current_text_color_tuple,      // Uses active or inactive logic
-            };
-            keys_to_draw.push(key_display);
-        }
-
-        // Set the font face once on the context (assuming it's the same for all keys)
-        ctx.set_font_face(&cairo_font_face);
-
-        for key_spec in keys_to_draw {
-            // Set font size for each key specifically, as it can vary
-            ctx.set_font_size(key_spec.text_size as f64);
-            draw_single_key_cairo(&ctx, &key_spec);
-        }
-
-        // Ensure all drawing operations are written to the underlying buffer.
-        // For an ImageSurface created with create_for_data, operations are generally direct.
-        // However, calling flush can be a good practice to ensure completion.
-        cairo_surface.flush();
-
-        // The manual pixel copy loop is no longer needed as Cairo draws directly into mmap_slice.
-        // The mmap_slice was a mutable borrow from self.mmap.as_mut().unwrap(), so changes are reflected.
-
-        log::debug!("Drawing content with Cairo complete.");
-        surface.attach(Some(&buffer), 0, 0);
-        surface.damage_buffer(0, 0, width, height);
-        surface.commit();
-
-        // If a previous buffer existed, destroy it.
-        // This should be handled carefully to ensure the compositor is done with it.
-        // Wayland buffer release events can be used for more robust management.
-        if let Some(old_buffer) = self.buffer.replace(buffer) {
-            old_buffer.destroy();
-        }
-        // self.mmap is already updated if it was recreated.
-    }
-}
-
-// Default appearance values (unscaled) - also used in check_config and AppState::draw
-const DEFAULT_CORNER_RADIUS_UNSCALED: f32 = 8.0;
-const DEFAULT_BORDER_THICKNESS_UNSCALED: f32 = 2.0;
-const DEFAULT_TEXT_SIZE_UNSCALED: f32 = 18.0;
-const DEFAULT_ROTATION_DEGREES: f32 = 0.0;
-impl Dispatch<xdg_wm_base::XdgWmBase, ()> for AppState {
-    fn event( _state: &mut AppState, proxy: &xdg_wm_base::XdgWmBase, event: xdg_wm_base::Event, _data: &(), _conn: &Connection, _qh: &QueueHandle<AppState>) {
-        if let xdg_wm_base::Event::Ping { serial } = event { proxy.pong(serial); }
-    }
-}
-
-impl Dispatch<xdg_surface::XdgSurface, ()> for AppState {
-    fn event( state: &mut AppState, surface_proxy: &xdg_surface::XdgSurface, event: xdg_surface::Event, _data: &(), _conn: &Connection, qh: &QueueHandle<AppState>) {
-        if let xdg_surface::Event::Configure { serial, .. } = event {
-            surface_proxy.ack_configure(serial);
-            if state.surface.is_some() {
-                log::debug!("XDG Surface Configure event: triggering draw and setting needs_redraw to false.");
-                state.draw(qh);
-                state.needs_redraw = false; // The configure event's draw handles the current need.
-            }
-        }
-    }
-}
-
-impl Dispatch<xdg_toplevel::XdgToplevel, ()> for AppState {
-    fn event( state: &mut AppState, _proxy: &xdg_toplevel::XdgToplevel, event: xdg_toplevel::Event, _data: &(), _conn: &Connection, _qh: &QueueHandle<AppState>) {
-        match event {
-            xdg_toplevel::Event::Configure { width, height, states } => {
-                log::debug!("XDG Toplevel Configure: width: {}, height: {}, states: {:?}", width, height, states);
-                if width > 0 { state.configured_width = width; }
-                if height > 0 { state.configured_height = height; }
-                // It might be good to trigger a redraw if size changed significantly,
-                // but the xdg_surface configure event usually follows and handles that.
-            }
-            xdg_toplevel::Event::Close => {
-                log::info!("XDG Toplevel Close event received. Application will exit.");
-                state.running = false; // Signal the main loop to stop
-            }
-            _ => {}
-        }
-    }
-}
-
-impl Dispatch<wl_compositor::WlCompositor, ()> for AppState {
-    fn event( _state: &mut AppState, _proxy: &wl_compositor::WlCompositor, _event: wl_compositor::Event, _udata: &(), _conn: &Connection, _qh: &QueueHandle<AppState>) {}
-}
-
-impl Dispatch<wl_surface::WlSurface, ()> for AppState {
-    fn event( _state: &mut AppState, _proxy: &wl_surface::WlSurface, _event: wl_surface::Event, _udata: &(), _conn: &Connection, _qh: &QueueHandle<AppState>) {}
-}
-
-impl Dispatch<wl_shm::WlShm, ()> for AppState {
-    fn event( _state: &mut AppState, _proxy: &wl_shm::WlShm, _event: wl_shm::Event, _udata: &(), _conn: &Connection, _qh: &QueueHandle<AppState>) {}
-}
-
-impl Dispatch<wl_registry::WlRegistry, ()> for AppState {
-    fn event( state: &mut AppState, registry: &wl_registry::WlRegistry, event: wl_registry::Event, _udata: &(), _conn: &Connection, qh: &QueueHandle<AppState>) {
-        if let wl_registry::Event::Global { name, interface, version } = event {
-            match interface.as_str() {
-                "wl_compositor" => { state.compositor = Some(registry.bind::<wl_compositor::WlCompositor, (), AppState>(name, std::cmp::min(version,5), qh, ())); }
-                "wl_shm" => { state.shm = Some(registry.bind::<wl_shm::WlShm, (), AppState>(name, std::cmp::min(version,1), qh, ())); }
-                "xdg_wm_base" => { state.xdg_wm_base = Some(registry.bind::<xdg_wm_base::XdgWmBase, (), AppState>(name, std::cmp::min(version,3), qh, ())); }
-                "zwlr_layer_shell_v1" => {
-                    state.layer_shell = Some(registry.bind::<zwlr_layer_shell_v1::ZwlrLayerShellV1, (), AppState>(name, std::cmp::min(version,4), qh, ()));
-                    log::info!("Bound zwlr_layer_shell_v1 version {}", std::cmp::min(version,4));
-                }
-                "zxdg_output_manager_v1" => {
-                    // xdg-output-manager is version 3 in wayland-protocols 0.30
-                    state.xdg_output_manager = Some(registry.bind::<zxdg_output_manager_v1::ZxdgOutputManagerV1, (), AppState>(name, std::cmp::min(version,3), qh, ()));
-                    log::info!("Bound zxdg_output_manager_v1 version {}", std::cmp::min(version,3));
-                }
-                "wl_output" => {
-                    let output_obj = registry.bind::<wl_output::WlOutput, _, _>(name, std::cmp::min(version, 4), qh, ()); // Version 4 is current max for wl_output
-                    log::info!("Bound wl_output (id: {}) version {}", output_obj.id(), std::cmp::min(version, 4));
-
-                    let xdg_output_obj_opt = if let Some(manager) = state.xdg_output_manager.as_ref() {
-                        // xdg-output is version 3
-                        let xdg_output = manager.get_xdg_output(&output_obj, qh, ());
-                        log::info!("Created zxdg_output_v1 (id: {}) for wl_output (id: {})", xdg_output.id(), output_obj.id());
-                        Some(xdg_output)
-                    } else {
-                        log::warn!("zxdg_output_manager_v1 not available when wl_output was bound. Cannot get zxdg_output_v1.");
-                        None
-                    };
-                    state.outputs.push((name, output_obj, xdg_output_obj_opt, OutputInfo::default()));
-                }
-                _ => {
-                    log::trace!("Ignoring unknown global: {} version {}", interface, version);
-                }
-            }
-        } else if let wl_registry::Event::GlobalRemove { name } = event {
-            log::info!("Global removed: ID {}", name);
-            state.outputs.retain(|(output_name, _, _, _)| *output_name != name);
-            if state.identified_target_wl_output_name == Some(name) {
-                log::warn!("Targeted wl_output (ID: {}) was removed. Clearing target.", name);
-                state.identified_target_wl_output_name = None;
-                // Potentially need to re-evaluate surface placement if it was on this output.
-                // For now, if size was already set, it might stay. If not, next valid output might be picked.
-            }
-        }
-    }
-}
-
-// Dispatcher for wl_output
-impl Dispatch<wl_output::WlOutput, ()> for AppState {
-    fn event(
-        _state: &mut AppState, // Changed to _state as it's not used directly here
-        _output: &wl_output::WlOutput,
-        event: wl_output::Event,
-        _data: &(),
-        _conn: &Connection,
-        _qh: &QueueHandle<AppState>,
-    ) {
-        // Find the output_registry_name (ID) corresponding to this wl_output object
-        // This is a bit indirect here as we only have the wl_output proxy.
-        // We'd typically store the ID alongside the proxy in AppState.outputs if we need to link back.
-        // For now, these logs are general. The zxdg_output_v1 events are more critical for sizing.
-
-        match event {
-            wl_output::Event::Geometry { x, y, physical_width, physical_height, subpixel, make, model, transform } => {
-                log::debug!("wl_output ({:?}) Geometry: x={}, y={}, phys_w={}, phys_h={}, subpixel={:?}, make={}, model={}, transform={:?}",
-                    _output.id(), x, y, physical_width, physical_height, subpixel, make, model, transform);
-            }
-            wl_output::Event::Mode { flags, width, height, refresh } => {
-                log::debug!("wl_output ({:?}) Mode: flags={:?}, width={}, height={}, refresh={}", _output.id(), flags, width, height, refresh);
-            }
-            wl_output::Event::Done => {
-                log::debug!("wl_output ({:?}) Done", _output.id());
-            }
-            wl_output::Event::Scale { factor } => {
-                log::debug!("wl_output ({:?}) Scale: factor={}", _output.id(), factor);
-            }
-            wl_output::Event::Name { name } => {
-                 log::debug!("wl_output ({:?}) Name: {}", _output.id(), name);
-            }
-            wl_output::Event::Description { description } => {
-                 log::debug!("wl_output ({:?}) Description: {}", _output.id(), description);
-            }
-            _ => {
-                log::trace!("Unhandled wl_output ({:?}) event: {:?}", _output.id(), event);
-            }
-        }
-    }
-}
-
-
-// Dispatcher for zxdg_output_manager_v1
-impl Dispatch<zxdg_output_manager_v1::ZxdgOutputManagerV1, ()> for AppState {
-    fn event(
-        _state: &mut AppState,
-        _manager: &zxdg_output_manager_v1::ZxdgOutputManagerV1,
-        event: zxdg_output_manager_v1::Event,
-        _data: &(),
-        _conn: &Connection,
-        _qh: &QueueHandle<AppState>,
-    ) {
-        log::trace!("zxdg_output_manager_v1 event: {:?}", event);
-    }
-}
-
-// Dispatcher for zxdg_output_v1
-impl Dispatch<zxdg_output_v1::ZxdgOutputV1, ()> for AppState {
-    fn event(
-        state: &mut AppState,
-        xdg_output: &zxdg_output_v1::ZxdgOutputV1,
-        event: zxdg_output_v1::Event,
-        _data: &(),
-        _conn: &Connection,
-        _qh: &QueueHandle<AppState>, // Renamed qh back to _qh as it's unused
-    ) {
-        // Find the entry in state.outputs that corresponds to this xdg_output object
-        let output_info_tuple = state.outputs.iter_mut().find(|(_, _, xdg_opt, _)| xdg_opt.as_ref().map_or(false, |x| x == xdg_output));
-
-        if let Some((output_registry_name, _, _, info)) = output_info_tuple {
-            let current_output_id = *output_registry_name;
-            match event {
-                zxdg_output_v1::Event::LogicalPosition { x, y } => {
-                    log::debug!("zxdg_output_v1 (ID: {}, wl_id: {:?}) LogicalPosition: x={}, y={}", current_output_id, xdg_output.id(), x, y);
-                }
-                zxdg_output_v1::Event::LogicalSize { width, height } => {
-                    log::debug!("zxdg_output_v1 (ID: {}, wl_id: {:?}) LogicalSize: width={}, height={}", current_output_id, xdg_output.id(), width, height);
-                    info.logical_width = width;
-                    info.logical_height = height;
-
-                    // Attempt to configure size if this is the target output or if no target is set yet
-                    if !state.initial_surface_size_set {
-                        if state.identified_target_wl_output_name.is_none() || state.identified_target_wl_output_name == Some(current_output_id) {
-                            if info.logical_width > 0 && info.logical_height > 0 {
-                                log::info!("LogicalSize event for relevant output (ID: {}) received with valid dimensions. Attempting to configure layer surface size.", current_output_id);
-                                state.attempt_configure_layer_surface_size(); // Removed qh
-                            }
-                        }
-                    }
-                }
-                zxdg_output_v1::Event::Done => {
-                    log::debug!("zxdg_output_v1 (ID: {}, wl_id: {:?}) Done. Current info: {:?}", current_output_id, xdg_output.id(), info);
-                    // This is a good place to attempt sizing, as all properties for this output have been sent.
-                    if !state.initial_surface_size_set {
-                        if state.identified_target_wl_output_name.is_none() || state.identified_target_wl_output_name == Some(current_output_id) {
-                            if info.logical_width > 0 && info.logical_height > 0 {
-                                log::info!("Done event for relevant output (ID: {}) received with valid dimensions. Attempting to configure layer surface size.", current_output_id);
-                                state.attempt_configure_layer_surface_size(); // Removed qh
-                            } else {
-                                log::warn!("Done event for relevant output (ID: {}) received, but dimensions still invalid ({}x{}). Size configuration deferred.", current_output_id, info.logical_width, info.logical_height);
-                            }
-                        }
-                    }
-                }
-                zxdg_output_v1::Event::Name { name } => {
-                    log::info!("zxdg_output_v1 (ID: {}, wl_id: {:?}) Name: {}", current_output_id, xdg_output.id(), name);
-                    info.name = Some(name);
-                }
-                zxdg_output_v1::Event::Description { description } => {
-                    log::info!("zxdg_output_v1 (ID: {}, wl_id: {:?}) Description: {}", current_output_id, xdg_output.id(), description);
-                    info.description = Some(description);
-                }
-                _ => {
-                     log::trace!("Unhandled zxdg_output_v1 (ID: {}, wl_id: {:?}) event: {:?}", current_output_id, xdg_output.id(), event);
-                }
-            }
-        } else {
-            log::warn!("Received zxdg_output_v1 event for an xdg_output object not found in AppState.outputs: {:?}", xdg_output.id());
-        }
-    }
-}
-
-impl Dispatch<wl_shm_pool::WlShmPool, ()> for AppState {
-    fn event( _state: &mut AppState, _proxy: &wl_shm_pool::WlShmPool, _event: wl_shm_pool::Event, _udata: &(), _conn: &Connection, _qh: &QueueHandle<AppState>) {}
-}
-
-impl Dispatch<wl_buffer::WlBuffer, ()> for AppState {
-    fn event( _state: &mut AppState, buffer: &wl_buffer::WlBuffer, event: wl_buffer::Event, _udata: &(), _conn: &Connection, _qh: &QueueHandle<AppState>) {
-        if let wl_buffer::Event::Release = event { log::debug!("Buffer {:?} released", buffer.id()); }
-    }
-}
-
-// Dispatcher for zwlr_layer_shell_v1
-impl Dispatch<zwlr_layer_shell_v1::ZwlrLayerShellV1, ()> for AppState {
-    fn event(
-        _state: &mut AppState,
-        _proxy: &zwlr_layer_shell_v1::ZwlrLayerShellV1,
-        event: zwlr_layer_shell_v1::Event,
-        _data: &(),
-        _conn: &Connection,
-        _qh: &QueueHandle<AppState>,
-    ) {
-        // zwlr_layer_shell_v1 has no events for the client to handle
-        log::trace!("zwlr_layer_shell_v1 event: {:?}", event);
-    }
-}
-
-/// Command-line arguments
+// Wayland Client Imports
+use wayland_client::Connection;
+
+// Standard Library Imports
+use std::io;
+use std::os::unix::io::{AsRawFd as _, RawFd}; // Used in main loop
+use std::process; // Used in main loop for poll error
+
+// Crate-specific modules
+mod config;
+mod draw; // Not directly used in main, but AppState::draw calls it
+mod event;
+mod keycodes;
+mod wayland;
+
+// External Crate Imports
+use clap::Parser;
+use freetype::Library as FreeTypeLibrary; // Used for --check
+ // Used for input::Libinput::new_with_udev by event.rs, but main needs it to create the context
+
+// Using items from the new modules
+use config::{
+    load_and_process_config,
+    print_overlay_config_for_check,
+    simulate_text_layout, // TextCheckResult is pub from config but not used directly here
+    validate_config,
+    AppConfig,
+    DEFAULT_TEXT_SIZE_UNSCALED,
+    // parse_color_string as config_parse_color_string, // aliased, but print_overlay_config_for_check uses config::parse_color_string
+};
+use event::MyLibinputInterface;
+// handle_libinput_events is called via event::handle_libinput_events
+// handle_wayland_events is called via wayland::handle_wayland_events
+use wayland::AppState;
+
+// Protocol imports for main function logic (surface creation, layer shell)
+use wayland_client::protocol::wl_output; // For selected_wl_output_proxy
+                                         // The following are not directly used in main after refactor, they are used within wayland.rs
+                                         // use wayland_client::protocol::{wl_surface, wl_compositor, wl_shm, wl_registry};
+                                         // use wayland_protocols::xdg::shell::client::{xdg_wm_base, xdg_surface, xdg_toplevel};
+use wayland_client::backend::WaylandError;
 use wayland_protocols_wlr::layer_shell::v1::client::{zwlr_layer_shell_v1, zwlr_layer_surface_v1};
 
+/// Command-line arguments
 #[derive(Parser, Debug)]
 #[clap(author, version, about, long_about = None)]
 struct Cli {
@@ -1258,332 +51,37 @@ struct Cli {
 
     /// Path to the configuration file
     #[clap(long, value_parser, default_value = "keys.toml")]
-    config: String,
+    config_path: String,
 
     /// Run in overlay mode (requires compositor support for wlr-layer-shell)
     #[clap(long)]
     overlay: bool,
 }
 
-// Helper function for --check: Validate configuration
-fn validate_config(config: &AppConfig) -> Result<(), String> {
-    // Check for overlapping keys
-    for i in 0..config.key.len() {
-        for j in (i + 1)..config.key.len() {
-            let key1 = &config.key[i];
-            let key2 = &config.key[j];
-
-            // Basic bounding box check (ignoring rotation for simplicity in this check)
-            let k1_left = key1.left;
-            let k1_right = key1.left + key1.width;
-            let k1_top = key1.top;
-            let k1_bottom = key1.top + key1.height;
-
-            let k2_left = key2.left;
-            let k2_right = key2.left + key2.width;
-            let k2_top = key2.top;
-            let k2_bottom = key2.top + key2.height;
-
-            if k1_left < k2_right && k1_right > k2_left && k1_top < k2_bottom && k1_bottom > k2_top {
-                return Err(format!(
-                    "Configuration validation error: Key '{}' (at {:.1},{:.1} size {:.1}x{:.1}) overlaps with key '{}' (at {:.1},{:.1} size {:.1}x{:.1})",
-                    key1.name, key1.left, key1.top, key1.width, key1.height,
-                    key2.name, key2.left, key2.top, key2.width, key2.height
-                ));
-            }
-        }
-    }
-
-    // Check for duplicate keycodes
-    let mut keycodes_seen = HashMap::new();
-    for key_config in &config.key {
-        if let Some(existing_key_name) = keycodes_seen.get(&key_config.keycode) {
-            return Err(format!(
-                "Configuration validation error: Duplicate keycode {} detected. Used by key '{}' and key '{}'.",
-                key_config.keycode, existing_key_name, key_config.name
-            ));
-        }
-        keycodes_seen.insert(key_config.keycode, key_config.name.clone());
-    }
-
-    // Check for invalid values (e.g. negative width/height)
-    for key_config in &config.key {
-        if key_config.width <= 0.0 {
-            return Err(format!("Configuration validation error: Key '{}' has non-positive width {:.1}.", key_config.name, key_config.width));
-        }
-        if key_config.height <= 0.0 {
-            return Err(format!("Configuration validation error: Key '{}' has non-positive height {:.1}.", key_config.name, key_config.height));
-        }
-        // text_size is optional, but if present, should be positive
-        if let Some(ts) = key_config.text_size {
-            if ts <= 0.0 {
-                 return Err(format!("Configuration validation error: Key '{}' has non-positive text_size {:.1}.", key_config.name, ts));
-            }
-        }
-         // corner_radius is optional, but if present, should be non-negative
-        if let Some(cr) = key_config.corner_radius {
-            if cr < 0.0 {
-                 return Err(format!("Configuration validation error: Key '{}' has negative corner_radius {:.1}.", key_config.name, cr));
-            }
-        }
-         // border_thickness is optional, but if present, should be non-negative
-        if let Some(bt) = key_config.border_thickness {
-            if bt < 0.0 {
-                 return Err(format!("Configuration validation error: Key '{}' has negative border_thickness {:.1}.", key_config.name, bt));
-            }
-        }
-    }
-
-
-    Ok(())
-}
-
-fn print_overlay_config_for_check(config: &OverlayConfig) {
-    println!("\nOverlay Configuration:");
-    println!("  Screen:               {}", config.screen.as_deref().unwrap_or("Compositor default"));
-    println!("  Position:             {:?}", config.position);
-
-    let width_str = match config.size_width {
-        Some(SizeDimension::Pixels(px)) => format!("{}px", px),
-        Some(SizeDimension::Ratio(r)) => format!("{:.0}% screen", r * 100.0),
-        None => "Derived from height/layout".to_string(),
-    };
-    let height_str = match config.size_height {
-        Some(SizeDimension::Pixels(px)) => format!("{}px", px),
-        Some(SizeDimension::Ratio(r)) => format!("{:.0}% screen", r * 100.0),
-        None => "Derived from width/layout".to_string(),
-    };
-    println!("  Size Width:           {}", width_str);
-    println!("  Size Height:          {}", height_str);
-
-    println!("  Margins (T,R,B,L):    {}, {}, {}, {}", config.margin_top, config.margin_right, config.margin_bottom, config.margin_left);
-
-    match parse_color_string(&config.background_color_inactive) {
-        Ok((r,g,b,a)) => println!("  Background Inactive:  {} (R:{:.2} G:{:.2} B:{:.2} A:{:.2})", config.background_color_inactive, r,g,b,a),
-        Err(e) => println!("  Background Inactive:  {} (Error: {})", config.background_color_inactive, e),
-    }
-    match parse_color_string(&config.background_color_active) {
-        Ok((r,g,b,a)) => println!("  Background Active:    {} (R:{:.2} G:{:.2} B:{:.2} A:{:.2}) (currently unused for global bg)", config.background_color_active, r,g,b,a),
-        Err(e) => println!("  Background Active:    {} (Error: {})", config.background_color_active, e),
-    }
-    match parse_color_string(&config.default_key_background_color) {
-        Ok((r,g,b,a)) => println!("  Default Key BG:       {} (R:{:.2} G:{:.2} B:{:.2} A:{:.2})", config.default_key_background_color, r,g,b,a),
-        Err(e) => println!("  Default Key BG:       {} (Error: {})", config.default_key_background_color, e),
-    }
-}
-
-// Helper struct for --check: Text metrics simulation result
-struct TextCheckResult {
-    final_font_size_pts: f64,
-    truncated_chars: usize,
-    final_text: String,
-}
-
-// Helper function for --check: Simulate text scaling and truncation
-fn simulate_text_layout(
-    key_config: &KeyConfig,
-    ft_face: &freetype::Face, // Pass FreeType face for metrics
-) -> Result<TextCheckResult, String> {
-    let original_text = key_config.name.clone();
-    let key_width = key_config.width as f64; // Use f64 for consistency with Cairo/FreeType
-    let key_height = key_config.height as f64;
-
-    let original_font_size_pts = key_config.text_size.unwrap_or(DEFAULT_TEXT_SIZE_UNSCALED) as f64;
-
-    // Define text area constraints (similar to draw_single_key_cairo)
-    // This padding is applied to the *unscaled* key dimensions for the check.
-    let text_padding = (key_width * 0.1).min(key_height * 0.1).max(2.0);
-    let max_text_width_px = key_width - 2.0 * text_padding;
-    // let max_text_height_px = key_height - 2.0 * text_padding; // Max height can also be a constraint
-
-    let min_font_size_pts = (original_font_size_pts * 0.5).max(6.0);
-
-    let mut current_text = original_text.clone();
-    let mut current_font_size_pts = original_font_size_pts;
-    let mut truncated_chars = 0;
-
-    // Function to get text width using FreeType
-    // Note: FreeType's pixel sizes are typically integer, but set_char_size can take 26.6 fixed point.
-    // For simplicity here, we'll round to nearest pixel for set_pixel_sizes.
-    // A more accurate simulation might use set_char_size with fractional points.
-    let get_ft_text_width = |text: &str, size_pts: f64, face: &freetype::Face| -> Result<f64, String> {
-        // Convert points to pixels for FreeType (assuming 96 DPI, standard for many systems)
-        // Pts to Px: Px = Pt * DPI / 72
-        // However, freetype's set_pixel_sizes is more direct if we assume pts = px for this simulation
-        // Or, if text_size in TOML is meant as pixel height:
-        let pixel_height = size_pts.round() as u32;
-        if pixel_height == 0 { return Ok(0.0); } // Avoid error with zero size
-
-        face.set_pixel_sizes(0, pixel_height).map_err(|e| format!("FreeType set_pixel_sizes failed: {:?}", e))?;
-
-        let mut total_width = 0.0;
-        for char_code in text.chars() {
-            face.load_char(char_code as usize, freetype::face::LoadFlag::RENDER)
-                .map_err(|e| format!("FreeType load_char failed for '{}': {:?}", char_code, e))?;
-            total_width += face.glyph().advance().x as f64 / 64.0; // Advance is in 1/64th of a pixel
-        }
-        Ok(total_width)
-    };
-
-    let mut text_width_px = get_ft_text_width(&current_text, current_font_size_pts, ft_face)?;
-
-    // 1. Font size scaling
-    while text_width_px > max_text_width_px && current_font_size_pts > min_font_size_pts {
-        current_font_size_pts *= 0.9;
-        if current_font_size_pts < min_font_size_pts {
-            current_font_size_pts = min_font_size_pts;
-        }
-        text_width_px = get_ft_text_width(&current_text, current_font_size_pts, ft_face)?;
-        if current_font_size_pts == min_font_size_pts && text_width_px > max_text_width_px {
-            break;
-        }
-    }
-
-    // 2. Text truncation
-    if text_width_px > max_text_width_px {
-        let ellipsis = "...";
-        let ellipsis_width_px = get_ft_text_width(ellipsis, current_font_size_pts, ft_face)?;
-        // let max_width_for_text_with_ellipsis = max_text_width_px - ellipsis_width_px;
-
-        while text_width_px > max_text_width_px && !current_text.is_empty() {
-            // let original_len = current_text.chars().count(); // This was unused
-            let initial_len_before_pop = current_text.chars().count();
-            current_text.pop(); // Remove last char
-            // Correctly calculate truncated_chars based on original text length and current length after pop
-            truncated_chars = original_text.chars().count() - current_text.chars().count();
-            if current_text.chars().count() < initial_len_before_pop { // A char was actually popped
-                 // This logic was slightly off, already handled by `original_text.chars().count() - current_text.chars().count()`
-            }
-
-            if current_text.is_empty() {
-                current_text = if ellipsis_width_px <= max_text_width_px { ellipsis.to_string() } else { "".to_string() };
-                text_width_px = get_ft_text_width(&current_text, current_font_size_pts, ft_face)?;
-                break;
-            }
-
-            let temp_text_with_ellipsis = format!("{}{}", current_text, ellipsis);
-            text_width_px = get_ft_text_width(&temp_text_with_ellipsis, current_font_size_pts, ft_face)?;
-
-            // More robust truncation: check if current_text + ellipsis fits.
-            // If current_text itself (without ellipsis) is already too small for max_width_for_text_with_ellipsis,
-            // then we must have added the ellipsis.
-            let current_text_only_width_px = get_ft_text_width(&current_text, current_font_size_pts, ft_face)?;
-            if current_text_only_width_px + ellipsis_width_px <= max_text_width_px {
-                 current_text = temp_text_with_ellipsis;
-                 text_width_px = get_ft_text_width(&current_text, current_font_size_pts, ft_face)?;
-                 break;
-            }
-        }
-
-        // Final check, if even ellipsis doesn't fit
-        if text_width_px > max_text_width_px {
-             let mut temp_ellipsis = ellipsis.to_string();
-             while get_ft_text_width(&temp_ellipsis, current_font_size_pts, ft_face)? > max_text_width_px && !temp_ellipsis.is_empty() {
-                temp_ellipsis.pop();
-             }
-             current_text = temp_ellipsis;
-             // Update truncated_chars based on how much of original_text is left vs how much of ellipsis is shown
-             // This is a bit tricky. If current_text is now ".." or ".", it means original was fully truncated.
-             if current_text.starts_with(ellipsis.chars().next().unwrap_or_default()) && current_text.len() < ellipsis.len() {
-                truncated_chars = original_text.chars().count();
-             } else if current_text.is_empty() {
-                truncated_chars = original_text.chars().count();
-             }
-        }
-    }
-
-    Ok(TextCheckResult {
-        final_font_size_pts: current_font_size_pts,
-        truncated_chars,
-        final_text: current_text,
-    })
-}
-
-
-// Modified main function (this one should be the active one)
 fn main() {
     let cli = Cli::parse();
 
-    // Initialize logger early for any messages during config loading or --check
-    // but allow --check to proceed even if full env_logger setup is complex.
-    // For --check, simple prints might be enough, but logs can be helpful.
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
+    if let Some(e) = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
         .try_init()
-        .err()
-        .map(|e| eprintln!("Failed to initialize logger: {}. Continuing without detailed logging for --check.", e));
+        .err() { eprintln!(
+                "Failed to initialize logger: {}. Continuing without detailed logging for --check.",
+                e
+            ) }
 
-
-    let config_path = &cli.config;
-    let config_content = match fs::read_to_string(config_path) {
-        Ok(content) => content,
-        Err(e) => {
-            eprintln!("Failed to read configuration file '{}': {}", config_path, e);
-            process::exit(1);
-        }
-    };
-
-    let mut app_config: AppConfig = match toml::from_str(&config_content) {
+    let app_config: AppConfig = match load_and_process_config(&cli.config_path) {
         Ok(config) => config,
         Err(e) => {
-            eprintln!("Failed to parse TOML configuration from '{}': {}", config_path, e);
+            eprintln!("{}", e);
             process::exit(1);
         }
     };
 
-    // Process raw_keycode to populate keycode (common for both --check and normal run)
-    let mut keycode_resolution_errors = Vec::new();
-    for key_conf in app_config.key.iter_mut() {
-        if key_conf.width <= 0.0 {
-            keycode_resolution_errors.push(format!("Key '{}' has invalid width: {}", key_conf.name, key_conf.width));
-        }
-        if key_conf.height <= 0.0 {
-             keycode_resolution_errors.push(format!("Key '{}' has invalid height: {}", key_conf.name, key_conf.height));
-        }
-
-        let resolved_code = match key_conf.raw_keycode.as_ref() {
-            Some(SerdeValue::String(s)) => keycodes::get_keycode_from_string(s),
-            Some(SerdeValue::U8(i)) => Ok(*i as u32),
-            Some(SerdeValue::U16(i)) => Ok(*i as u32),
-            Some(SerdeValue::U32(i)) => Ok(*i),
-            Some(SerdeValue::U64(i)) => if *i <= u32::MAX as u64 { Ok(*i as u32) } else { Err(format!("Integer keycode {} for key '{}' is too large for u32.", i, key_conf.name)) },
-            Some(SerdeValue::I8(i)) => if *i >= 0 { Ok(*i as u32) } else { Err(format!("Negative keycode {} for key '{}' is invalid.", i, key_conf.name)) },
-            Some(SerdeValue::I16(i)) => if *i >= 0 { Ok(*i as u32) } else { Err(format!("Negative keycode {} for key '{}' is invalid.", i, key_conf.name)) },
-            Some(SerdeValue::I32(i)) => if *i >= 0 { Ok(*i as u32) } else { Err(format!("Negative keycode {} for key '{}' is invalid.", i, key_conf.name)) },
-            Some(SerdeValue::I64(i)) => if *i >= 0 && *i <= u32::MAX as i64 { Ok(*i as u32) } else { Err(format!("Integer keycode {} for key '{}' is out of valid u32 range.", i, key_conf.name)) },
-            None => keycodes::get_keycode_from_string(&key_conf.name),
-            Some(other_type) => Err(format!("Invalid type for keycode field for key '{}': expected string or integer, got {:?}", key_conf.name, other_type)),
-        };
-
-        match resolved_code {
-            Ok(code) => key_conf.keycode = code,
-            Err(e) => {
-                let error_msg = if key_conf.raw_keycode.is_none() {
-                    format!(
-                        "Error processing key '{}': Could not resolve default keycode from name ('{}'). Please specify a 'keycode' field. Details: {}",
-                        key_conf.name, key_conf.name, e
-                    )
-                } else {
-                    format!("Error processing keycode for key '{}': {}", key_conf.name, e)
-                };
-                keycode_resolution_errors.push(error_msg);
-            }
-        }
-    }
-
-    if !keycode_resolution_errors.is_empty() {
-        eprintln!("Errors found during keycode resolution:");
-        for err in keycode_resolution_errors {
-            eprintln!("- {}", err);
-        }
-        process::exit(1);
-    }
-    // End of common config processing part needed for --check too
-
-
     if cli.check {
-        println!("Performing configuration check for '{}'...", config_path);
+        println!(
+            "Performing configuration check for '{}'...",
+            &cli.config_path
+        );
 
-        // Validate configuration (overlapping keys, duplicate keycodes, etc.)
         if let Err(e) = validate_config(&app_config) {
             eprintln!("Configuration validation failed: {}", e);
             process::exit(1);
@@ -1591,7 +89,6 @@ fn main() {
             println!("Basic validation (overlaps, duplicates, positive dimensions) passed.");
         }
 
-        // Load font for text metrics
         let font_data: &[u8] = include_bytes!("../default-font/DejaVuSansMono.ttf");
         let ft_library = match FreeTypeLibrary::init() {
             Ok(lib) => lib,
@@ -1609,64 +106,74 @@ fn main() {
         };
 
         println!("\nKey Information (Layout from TOML, Text metrics simulated):");
-        println!("{:<20} | {:<25} | {:<10} | {:<10} | {:<20}",
-                 "Label (Name)", "Bounding Box (L,T,R,B)", "Keycode", "Font Scale", "Truncated Label");
-        println!("{:-<20}-+-{:-<25}-+-{:-<10}-+-{:-<10}-+-{:-<20}", "", "", "", "", "");
+        println!(
+            "{:<20} | {:<25} | {:<10} | {:<10} | {:<20}",
+            "Label (Name)", "Bounding Box (L,T,R,B)", "Keycode", "Font Scale", "Truncated Label"
+        );
+        println!(
+            "{:-<20}-+-{:-<25}-+-{:-<10}-+-{:-<10}-+-{:-<20}",
+            "", "", "", "", ""
+        );
 
-        for key_config in &app_config.key {
-            let right_edge = key_config.left + key_config.width;
-            let bottom_edge = key_config.top + key_config.height;
-            let bbox_str = format!("{:.1},{:.1}, {:.1},{:.1}",
-                                   key_config.left, key_config.top,
-                                   right_edge, bottom_edge);
+        for key_config_item in &app_config.key {
+            let right_edge = key_config_item.left + key_config_item.width;
+            let bottom_edge = key_config_item.top + key_config_item.height;
+            let bbox_str = format!(
+                "{:.1},{:.1}, {:.1},{:.1}",
+                key_config_item.left, key_config_item.top, right_edge, bottom_edge
+            );
 
-            let initial_font_size = key_config.text_size.unwrap_or(DEFAULT_TEXT_SIZE_UNSCALED) as f64;
+            let initial_font_size = key_config_item
+                .text_size
+                .unwrap_or(DEFAULT_TEXT_SIZE_UNSCALED) as f64;
 
-            match simulate_text_layout(key_config, &ft_face) {
+            match simulate_text_layout(key_config_item, &ft_face) {
+                // This now correctly uses config::simulate_text_layout
                 Ok(text_check_result) => {
+                    // text_check_result is config::TextCheckResult
                     let font_scale = if initial_font_size > 0.0 {
                         text_check_result.final_font_size_pts / initial_font_size
                     } else {
-                        1.0 // Avoid division by zero, should not happen with validation
+                        1.0
                     };
 
-                    let truncated_label_display = if text_check_result.truncated_chars > 0 || !text_check_result.final_text.eq(&key_config.name) {
+                    let truncated_label_display = if text_check_result.truncated_chars > 0
+                        || !text_check_result.final_text.eq(&key_config_item.name)
+                    {
                         text_check_result.final_text
                     } else {
-                        "".to_string() // Empty if not truncated from original name
+                        "".to_string()
                     };
 
-                    println!("{:<20} | {:<25} | {:<10} | {:<10.2} | {:<20}",
-                             key_config.name,
-                             bbox_str,
-                             key_config.keycode,
-                             font_scale,
-                             truncated_label_display
-                        );
+                    println!(
+                        "{:<20} | {:<25} | {:<10} | {:<10.2} | {:<20}",
+                        key_config_item.name,
+                        bbox_str,
+                        key_config_item.keycode,
+                        font_scale,
+                        truncated_label_display
+                    );
                 }
                 Err(e) => {
-                     println!("{:<20} | {:<25} | {:<10} | {:<10.2} | Error simulating text: {} ",
-                             key_config.name,
-                             bbox_str,
-                             key_config.keycode,
-                             1.0, // Default scale in case of error
-                             e
-                        );
+                    println!(
+                        "{:<20} | {:<25} | {:<10} | {:<10.2} | Error simulating text: {} ",
+                        key_config_item.name, bbox_str, key_config_item.keycode, 1.0, e
+                    );
                 }
             }
         }
 
-        print_overlay_config_for_check(&app_config.overlay);
+        print_overlay_config_for_check(&app_config.overlay); // This now correctly uses config::print_overlay_config_for_check
 
         println!("\nConfiguration check finished.");
         process::exit(0);
     }
 
-    // Proceed with normal application startup if --check is not present
-    // (Logger was already initialized)
-    log::info!("Starting Wayland application with config '{}'...", config_path);
+    log::info!(
+        "Starting Wayland application with config '{}'...",
+        &cli.config_path
+    );
     log::info!("Configuration loaded and processed successfully.");
-
 
     let conn = Connection::connect_to_env().unwrap_or_else(|e| {
         log::error!("Failed to connect to Wayland display: {}", e);
@@ -1676,12 +183,13 @@ fn main() {
 
     let mut event_queue = conn.new_event_queue();
     let qh = event_queue.handle();
-    let mut app_state = AppState::new(app_config.clone()); // app_config is cloned into AppState here
+
+    let mut app_state = AppState::new(app_config.clone());
+
     let _registry = conn.display().get_registry(&qh, ());
 
     log::trace!("Dispatching initial events to bind globals and get initial output info...");
-    // Perform a few roundtrips to ensure globals are bound and initial output events (like names) are processed.
-    for _ in 0..3 { // Loop a few times to catch initial events.
+    for _ in 0..3 {
         if event_queue.dispatch_pending(&mut app_state).is_err() {
             log::error!("Error dispatching events during initial setup.");
             break;
@@ -1691,23 +199,33 @@ fn main() {
             break;
         }
     }
-    // A final roundtrip can sometimes help ensure all initial announcements are processed.
     if event_queue.roundtrip(&mut app_state).is_err() {
         log::error!("Error during final initial roundtrip for global binding.");
-        // Not exiting here, as some globals might still be bound.
     }
 
-
-    if app_state.compositor.is_none() || app_state.shm.is_none() || app_state.xdg_wm_base.is_none() {
-        log::error!("Failed to bind essential Wayland globals (wl_compositor, wl_shm, xdg_wm_base).");
+    if app_state.compositor.is_none() || app_state.shm.is_none() || app_state.xdg_wm_base.is_none()
+    {
+        log::error!(
+            "Failed to bind essential Wayland globals (wl_compositor, wl_shm, xdg_wm_base)."
+        );
         eprintln!("Could not bind essential Wayland globals. This usually means the Wayland compositor is missing support or encountered an issue.");
         process::exit(1);
     }
-    log::info!("Essential Wayland globals bound. Number of outputs found: {}", app_state.outputs.len());
+    log::info!(
+        "Essential Wayland globals bound. Number of outputs found: {}",
+        app_state.outputs.len()
+    );
     for (idx, (name, _, _, info)) in app_state.outputs.iter().enumerate() {
-        log::debug!("  Output [{}], ID: {}, Name: {:?}, Desc: {:?}, Logical Dims: {}x{}", idx, name, info.name, info.description, info.logical_width, info.logical_height);
+        log::debug!(
+            "  Output [{}], ID: {}, Name: {:?}, Desc: {:?}, Logical Dims: {}x{}",
+            idx,
+            name,
+            info.name.as_deref().unwrap_or("N/A"),
+            info.description.as_deref().unwrap_or("N/A"),
+            info.logical_width,
+            info.logical_height
+        );
     }
-
 
     let interface = MyLibinputInterface;
     let mut libinput_context = input::Libinput::new_with_udev(interface);
@@ -1719,39 +237,57 @@ fn main() {
         Err(e) => {
             log::warn!("Failed to assign seat0 to libinput context: {:?}. Input monitoring will be disabled.", e);
             log::warn!("This may be due to permissions issues. Ensure the user is in the 'input' group or has direct access to /dev/input/event* devices.");
-            // Do not exit, allow OSD to run visually even without input.
         }
     }
 
-    let surface = app_state.compositor.as_ref().unwrap().create_surface(&qh, ());
+    let surface = app_state
+        .compositor
+        .as_ref()
+        .unwrap()
+        .create_surface(&qh, ());
     app_state.surface = Some(surface.clone());
 
     if cli.overlay {
         log::info!("Overlay mode requested. Attempting to use wlr-layer-shell.");
         if let Some(layer_shell) = app_state.layer_shell.as_ref() {
             let mut selected_wl_output_proxy: Option<&wl_output::WlOutput> = None;
-            // app_state.target_output_identifier was already populated from config in AppState::new
 
             if let Some(target_screen_specifier) = app_state.target_output_identifier.as_ref() {
-                log::info!("Attempting to find screen specified in config as: '{}'", target_screen_specifier);
-                // Try to parse as index first
+                log::info!(
+                    "Attempting to find screen specified in config as: '{}'",
+                    target_screen_specifier
+                );
                 if let Ok(target_idx) = target_screen_specifier.parse::<usize>() {
-                    if let Some((output_registry_name, wl_output_proxy_ref, _, info)) = app_state.outputs.get(target_idx) {
+                    if let Some((output_registry_name, wl_output_proxy_ref, _, info)) =
+                        app_state.outputs.get(target_idx)
+                    {
                         selected_wl_output_proxy = Some(wl_output_proxy_ref);
                         app_state.identified_target_wl_output_name = Some(*output_registry_name);
-                        log::info!("Selected screen by index {}: ID {}, Name: {:?}", target_idx, output_registry_name, info.name.as_deref().unwrap_or("N/A"));
+                        log::info!(
+                            "Selected screen by index {}: ID {}, Name: {:?}",
+                            target_idx,
+                            output_registry_name,
+                            info.name.as_deref().unwrap_or("N/A")
+                        );
                     } else {
                         log::warn!("Screen index {} from config is out of bounds ({} outputs available). Compositor will choose output.", target_idx, app_state.outputs.len());
                     }
                 } else {
-                    // Try to match by name (zxdg_output_v1 name or description)
                     let mut matched_by_name = false;
                     for (output_registry_name, wl_output_proxy_ref, _, info) in &app_state.outputs {
-                        if info.name.as_deref() == Some(target_screen_specifier) || info.description.as_deref() == Some(target_screen_specifier) {
+                        if info.name.as_deref() == Some(target_screen_specifier)
+                            || info.description.as_deref() == Some(target_screen_specifier)
+                        {
                             selected_wl_output_proxy = Some(wl_output_proxy_ref);
-                            app_state.identified_target_wl_output_name = Some(*output_registry_name);
+                            app_state.identified_target_wl_output_name =
+                                Some(*output_registry_name);
                             matched_by_name = true;
-                            log::info!("Selected screen by name/description '{}': ID {}, Name: {:?}", target_screen_specifier, output_registry_name, info.name.as_deref().unwrap_or("N/A"));
+                            log::info!(
+                                "Selected screen by name/description '{}': ID {}, Name: {:?}",
+                                target_screen_specifier,
+                                output_registry_name,
+                                info.name.as_deref().unwrap_or("N/A")
+                            );
                             break;
                         }
                     }
@@ -1759,204 +295,221 @@ fn main() {
                         log::warn!("Screen specifier '{}' from config not found by name or description. Compositor will choose output.", target_screen_specifier);
                         log::debug!("Available outputs for matching by name/description:");
                         for (idx, (id, _, _, i)) in app_state.outputs.iter().enumerate() {
-                            log::debug!("  [{}]: ID: {}, Name: {:?}, Description: {:?}", idx, id, i.name, i.description);
+                            log::debug!(
+                                "  [{}]: ID: {}, Name: {:?}, Description: {:?}",
+                                idx,
+                                id,
+                                i.name.as_deref().unwrap_or("N/A"),
+                                i.description.as_deref().unwrap_or("N/A")
+                            );
                         }
                     }
                 }
             } else {
                 log::info!("No specific screen configured (overlay.screen is None). Compositor will choose output.");
-                // If no screen is specified, we might pick the first one with dimensions later,
-                // or let the compositor decide if selected_wl_output_proxy remains None.
-                // For now, identified_target_wl_output_name remains None.
             }
 
             let layer_surface_obj = layer_shell.get_layer_surface(
                 &surface,
-                selected_wl_output_proxy, // output: None means compositor chooses
+                selected_wl_output_proxy,
                 zwlr_layer_shell_v1::Layer::Overlay,
-                "wayland-kbd-osd".to_string(), // namespace
+                "wayland-kbd-osd".to_string(),
                 &qh,
-                ()
+                (),
             );
-            // Configure the layer surface
+
             let base_anchor = match app_state.config.overlay.position {
-                OverlayPosition::Top | OverlayPosition::TopCenter => {
-                    zwlr_layer_surface_v1::Anchor::Top | zwlr_layer_surface_v1::Anchor::Left | zwlr_layer_surface_v1::Anchor::Right
+                config::OverlayPosition::Top | config::OverlayPosition::TopCenter => {
+                    zwlr_layer_surface_v1::Anchor::Top
+                        | zwlr_layer_surface_v1::Anchor::Left
+                        | zwlr_layer_surface_v1::Anchor::Right
                 }
-                OverlayPosition::Bottom | OverlayPosition::BottomCenter => {
-                    zwlr_layer_surface_v1::Anchor::Bottom | zwlr_layer_surface_v1::Anchor::Left | zwlr_layer_surface_v1::Anchor::Right
+                config::OverlayPosition::Bottom | config::OverlayPosition::BottomCenter => {
+                    zwlr_layer_surface_v1::Anchor::Bottom
+                        | zwlr_layer_surface_v1::Anchor::Left
+                        | zwlr_layer_surface_v1::Anchor::Right
                 }
-                OverlayPosition::Left => zwlr_layer_surface_v1::Anchor::Left, // Implies vertical centering by not setting Top or Bottom
-                OverlayPosition::Right => zwlr_layer_surface_v1::Anchor::Right, // Implies vertical centering
-                OverlayPosition::Center => { // No anchors, compositor centers. Size must be non-zero.
-                    // If we set (0,0) size with empty anchor, it's often an error or fills screen.
-                    // The error is "y == 0 but anchor doesn't have top and bottom"
-                    // For Center, if we are setting size (0,0) initially, it might be safer to anchor all sides.
-                    // However, the specific error was with Bottom anchor. Let's stick to fixing that first.
-                    // If Center also causes issues with (0,0), it might need similar treatment or ensure initial size > 0.
-                    zwlr_layer_surface_v1::Anchor::Top | zwlr_layer_surface_v1::Anchor::Bottom | zwlr_layer_surface_v1::Anchor::Left | zwlr_layer_surface_v1::Anchor::Right
+                config::OverlayPosition::Left => zwlr_layer_surface_v1::Anchor::Left,
+                config::OverlayPosition::Right => zwlr_layer_surface_v1::Anchor::Right,
+                config::OverlayPosition::Center => {
+                    zwlr_layer_surface_v1::Anchor::Top
+                        | zwlr_layer_surface_v1::Anchor::Bottom
+                        | zwlr_layer_surface_v1::Anchor::Left
+                        | zwlr_layer_surface_v1::Anchor::Right
                 }
-                OverlayPosition::TopLeft => zwlr_layer_surface_v1::Anchor::Top | zwlr_layer_surface_v1::Anchor::Left,
-                OverlayPosition::TopRight => zwlr_layer_surface_v1::Anchor::Top | zwlr_layer_surface_v1::Anchor::Right,
-                OverlayPosition::BottomLeft => zwlr_layer_surface_v1::Anchor::Bottom | zwlr_layer_surface_v1::Anchor::Left,
-                OverlayPosition::BottomRight => zwlr_layer_surface_v1::Anchor::Bottom | zwlr_layer_surface_v1::Anchor::Right,
-                // For CenterLeft/CenterRight, not specifying Top/Bottom means they are centered vertically.
-                // This should be fine with (0,0) size as horizontal anchors are set.
-                OverlayPosition::CenterLeft => zwlr_layer_surface_v1::Anchor::Left,
-                OverlayPosition::CenterRight => zwlr_layer_surface_v1::Anchor::Right,
+                config::OverlayPosition::TopLeft => {
+                    zwlr_layer_surface_v1::Anchor::Top | zwlr_layer_surface_v1::Anchor::Left
+                }
+                config::OverlayPosition::TopRight => {
+                    zwlr_layer_surface_v1::Anchor::Top | zwlr_layer_surface_v1::Anchor::Right
+                }
+                config::OverlayPosition::BottomLeft => {
+                    zwlr_layer_surface_v1::Anchor::Bottom | zwlr_layer_surface_v1::Anchor::Left
+                }
+                config::OverlayPosition::BottomRight => {
+                    zwlr_layer_surface_v1::Anchor::Bottom | zwlr_layer_surface_v1::Anchor::Right
+                }
+                config::OverlayPosition::CenterLeft => zwlr_layer_surface_v1::Anchor::Left,
+                config::OverlayPosition::CenterRight => zwlr_layer_surface_v1::Anchor::Right,
             };
 
-            let final_anchor = base_anchor;
-            // The logic for conditionally adding opposite anchors has been removed.
-            // We now rely on the initial (1,1) surface size to prevent crashes with single-sided anchors,
-            // and `base_anchor` directly reflects the user's intended positioning.
-
-            log::info!("Setting anchor to: {:?}", final_anchor);
-            layer_surface_obj.set_anchor(final_anchor);
+            log::info!("Setting anchor to: {:?}", base_anchor);
+            layer_surface_obj.set_anchor(base_anchor);
 
             let margins = &app_state.config.overlay;
-            log::info!("Setting margins: T={}, R={}, B={}, L={}", margins.margin_top, margins.margin_right, margins.margin_bottom, margins.margin_left);
-            layer_surface_obj.set_margin(margins.margin_top, margins.margin_right, margins.margin_bottom, margins.margin_left);
+            log::info!(
+                "Setting margins: T={}, R={}, B={}, L={}",
+                margins.margin_top,
+                margins.margin_right,
+                margins.margin_bottom,
+                margins.margin_left
+            );
+            layer_surface_obj.set_margin(
+                margins.margin_top,
+                margins.margin_right,
+                margins.margin_bottom,
+                margins.margin_left,
+            );
 
-            layer_surface_obj.set_keyboard_interactivity(zwlr_layer_surface_v1::KeyboardInteractivity::None);
-            layer_surface_obj.set_exclusive_zone(0); // Do not reserve space
+            layer_surface_obj
+                .set_keyboard_interactivity(zwlr_layer_surface_v1::KeyboardInteractivity::None);
+            layer_surface_obj.set_exclusive_zone(0);
 
-            // Initial size is set to (1,1) as a placeholder to avoid issues with (0,0) and anchors.
-            // Actual size will be set later by attempt_configure_layer_surface_size
-            // once screen dimensions are known.
             log::info!("Setting initial layer surface size to (1,1). Actual size will be configured once screen dimensions are known.");
             layer_surface_obj.set_size(1, 1);
-
-            // We still need to commit the surface for the layer surface to be mapped.
-            // The app_state.configured_width/height will be updated by the compositor via ::Configure event.
-            // The drawing logic uses app_state.configured_width/height.
 
             app_state.layer_surface = Some(layer_surface_obj);
             log::info!("Created and configured layer surface for overlay mode.");
         } else {
             log::error!("--overlay flag was used, but zwlr_layer_shell_v1 is not available from the compositor. Falling back to normal window mode.");
-            // Fallback to XDG toplevel
-            let xdg_surface = app_state.xdg_wm_base.as_ref().unwrap().get_xdg_surface(&surface, &qh, ());
-            let toplevel = xdg_surface.get_toplevel(&qh, ());
+            let xdg_surface_proxy =
+                app_state
+                    .xdg_wm_base
+                    .as_ref()
+                    .unwrap()
+                    .get_xdg_surface(&surface, &qh, ());
+            let toplevel = xdg_surface_proxy.get_toplevel(&qh, ());
             toplevel.set_title("Wayland Keyboard OSD (Fallback)".to_string());
-            app_state.surface = Some(surface.clone()); // Ensure surface is set for XDG path
         }
     } else {
         log::info!("Normal window mode requested (XDG shell).");
-        let xdg_surface = app_state.xdg_wm_base.as_ref().unwrap().get_xdg_surface(&surface, &qh, ());
-        let toplevel = xdg_surface.get_toplevel(&qh, ());
+        let xdg_surface_proxy =
+            app_state
+                .xdg_wm_base
+                .as_ref()
+                .unwrap()
+                .get_xdg_surface(&surface, &qh, ());
+        let toplevel = xdg_surface_proxy.get_toplevel(&qh, ());
         toplevel.set_title("Wayland Keyboard OSD".to_string());
     }
 
-    surface.commit(); // Commit to make the surface known to the compositor and apply layer/xdg settings
+    surface.commit();
 
-    // Dispatch events once to process initial configure and draw the window.
     log::info!("Initial surface commit done. Dispatching events to catch initial configure...");
     if event_queue.roundtrip(&mut app_state).is_err() {
         log::error!("Error during roundtrip after surface commit (waiting for initial configure).");
-        // Depending on the error, might want to exit or handle differently
     }
 
-    // If in overlay mode, wait for screen dimensions to be populated
     if cli.overlay && app_state.layer_shell.is_some() {
-        // The "wait loop" for dimensions is now less critical for initial sizing,
-        // as sizing is deferred to event handlers.
-        // However, dispatching some initial events is still good practice to ensure output names/descriptions
-        // are processed if a specific output was targeted by name/description.
-        // The main selection logic for `identified_target_wl_output_name` already ran before creating the layer surface.
-        // We will now try to explicitly trigger the sizing logic if possible.
-
         log::info!("Initial layer surface setup complete. Attempting to configure size based on currently known screen dimensions...");
-        app_state.attempt_configure_layer_surface_size(); // Removed qh
+        app_state.attempt_configure_layer_surface_size();
 
         if !app_state.initial_surface_size_set {
             log::warn!("Initial attempt to set layer surface size deferred as screen dimensions are not yet known or not valid for the target output. Will retry upon receiving output events.");
         }
     }
 
-    // An explicit draw call here might be needed if the first configure doesn't trigger it,
-    // or if we want to show something before the first configure.
-    // However, the xdg_surface or layer_surface configure event should trigger the first draw.
     log::info!("Initial setup phase complete. Wayland window should be configured or awaiting configuration. Waiting for events...");
-
-    // Imports for LibinputEvent, KeyboardEvent, KeyState, KeyboardEventTrait, WaylandError
-    // are now at the top of the module.
-    use std::os::unix::io::{AsRawFd as _, RawFd};
-    use std::io;
 
     log::info!("Entering main event loop.");
 
     let wayland_raw_fd: RawFd = match conn.prepare_read() {
         Ok(guard) => guard.connection_fd().as_raw_fd(),
         Err(e) => {
-            log::error!("Failed to prepare_read Wayland connection before starting event loop: {}", e);
+            log::error!(
+                "Failed to prepare_read Wayland connection before starting event loop: {}",
+                e
+            );
             process::exit(1);
         }
     };
 
     let mut fds: Vec<libc::pollfd> = Vec::new();
-    fds.push(libc::pollfd { fd: wayland_raw_fd, events: libc::POLLIN, revents: 0 });
+    fds.push(libc::pollfd {
+        fd: wayland_raw_fd,
+        events: libc::POLLIN,
+        revents: 0,
+    });
     const WAYLAND_FD_IDX: usize = 0;
 
     let mut libinput_fd_idx_opt: Option<usize> = None;
-    if let Some(ref context) = app_state.input_context { // context can be an immutable ref now
+    if let Some(ref context) = app_state.input_context {
         let libinput_raw_fd: RawFd = context.as_raw_fd();
-        fds.push(libc::pollfd { fd: libinput_raw_fd, events: libc::POLLIN, revents: 0 });
+        fds.push(libc::pollfd {
+            fd: libinput_raw_fd,
+            events: libc::POLLIN,
+            revents: 0,
+        });
         libinput_fd_idx_opt = Some(fds.len() - 1);
-        log_if_input_device_access_denied(&app_state.config, true); // Pass true since context is Some
+        log_if_input_device_access_denied(&app_state.config, true);
     } else {
-        log_if_input_device_access_denied(&app_state.config, false); // Pass false since context is None
-        log::warn!("No libinput context available. Key press/release events will not be monitored.");
+        log_if_input_device_access_denied(&app_state.config, false);
+        log::warn!(
+            "No libinput context available. Key press/release events will not be monitored."
+        );
     }
 
-
-    let poll_timeout_ms = 33; // Timeout for poll in milliseconds (previously 100)
+    let poll_timeout_ms = 33;
 
     while app_state.running {
-        for item in fds.iter_mut() { item.revents = 0; }
-        // `needs_redraw` is now part of `app_state` and is managed across iterations/event types.
+        for item in fds.iter_mut() {
+            item.revents = 0;
+        }
 
-        let ret = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, poll_timeout_ms) };
+        let ret =
+            unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, poll_timeout_ms) };
 
         if ret < 0 {
             let errno = io::Error::last_os_error().raw_os_error().unwrap_or(0);
-            if errno == libc::EINTR { continue; }
+            if errno == libc::EINTR {
+                continue;
+            }
             log::error!("libc::poll error: {}", io::Error::last_os_error());
-            app_state.running = false; break;
+            app_state.running = false;
+            break;
         } else if ret == 0 {
             // Timeout
         } else {
-            // Wayland events
-            if (fds[WAYLAND_FD_IDX].revents & libc::POLLIN) != 0 {
-                if handle_wayland_events(&conn, &mut event_queue, &mut app_state).is_err() {
-                    // app_state.running is set to false within handle_wayland_events on error
-                    break;
-                }
+            if (fds[WAYLAND_FD_IDX].revents & libc::POLLIN) != 0 && wayland::handle_wayland_events(&conn, &mut event_queue, &mut app_state).is_err() {
+                break;
             }
             if (fds[WAYLAND_FD_IDX].revents & (libc::POLLERR | libc::POLLHUP)) != 0 {
                 log::error!("Wayland FD error/hangup (POLLERR/POLLHUP). Exiting.");
                 app_state.running = false;
             }
 
-            // Libinput events
             if let Some(libinput_idx) = libinput_fd_idx_opt {
                 if app_state.running && (fds[libinput_idx].revents & libc::POLLIN) != 0 {
-                    handle_libinput_events(&mut app_state);
+                    event::handle_libinput_events(&mut app_state);
                 }
-                if app_state.running && (fds[libinput_idx].revents & (libc::POLLERR | libc::POLLHUP)) != 0 {
-                    log::error!("Libinput FD error/hangup (POLLERR/POLLHUP). Input monitoring might stop.");
-                    // Attempt to dispatch any remaining events from libinput before removing it
+                if app_state.running
+                    && (fds[libinput_idx].revents & (libc::POLLERR | libc::POLLHUP)) != 0
+                {
+                    log::error!(
+                        "Libinput FD error/hangup (POLLERR/POLLHUP). Input monitoring might stop."
+                    );
                     if let Some(ref mut context) = app_state.input_context {
-                        let _ = context.dispatch(); // Ignore error here, as we are already in an error state
+                        let _ = context.dispatch();
                     }
-                    app_state.input_context = None; // Stop using libinput
+                    app_state.input_context = None;
 
-                    // Remove the libinput FD from the poll list carefully
-                    // Find the actual index of libinput_fd in fds, in case WAYLAND_FD_IDX is not 0 or list changes
-                    if let Some(idx_to_remove) = fds.iter().position(|pollfd| pollfd.fd == fds[libinput_idx].fd) {
+                    if let Some(idx_to_remove) = fds
+                        .iter()
+                        .position(|pollfd| pollfd.fd == fds[libinput_idx].fd)
+                    {
                         fds.remove(idx_to_remove);
                     }
-                    libinput_fd_idx_opt = None; // Clear the option
+                    libinput_fd_idx_opt = None;
 
                     log::warn!("Libinput context removed due to FD error. Key press/release events will no longer be monitored.");
                 }
@@ -1971,10 +524,10 @@ fn main() {
             if app_state.surface.is_some() {
                 log::debug!("Main loop: needs_redraw is true, calling draw.");
                 app_state.draw(&qh);
-                app_state.needs_redraw = false; // Reset after drawing
+                app_state.needs_redraw = false;
             } else {
                 log::warn!("Main loop: needs_redraw is true, but surface is None. Skipping draw.");
-                app_state.needs_redraw = false; // Still reset to prevent loop if surface never appears
+                app_state.needs_redraw = false;
             }
         }
 
@@ -1990,85 +543,17 @@ fn main() {
     log::info!("Exiting application loop.");
 }
 
-fn handle_wayland_events(
-    conn: &Connection,
-    event_queue: &mut wayland_client::EventQueue<AppState>,
-    app_state: &mut AppState,
-) -> Result<(), ()> {
-    match conn.prepare_read() { // Changed from if let Some(guard)
-        Ok(guard) => { // Handle Ok case
-            match guard.read() {
-                Ok(bytes_read) => {
-                    log::trace!("Successfully read {} bytes from Wayland socket", bytes_read);
-                    match event_queue.dispatch_pending(app_state) {
-                        Ok(_) => {}
-                        Err(e) => {
-                            log::error!("Error dispatching Wayland events: {}", e);
-                            app_state.running = false;
-                            return Err(());
-                        }
-                    }
-                }
-                Err(WaylandError::Io(io_err)) if io_err.kind() == std::io::ErrorKind::WouldBlock => {
-                    // No new events, this is normal.
-                }
-                Err(e) => {
-                    log::error!("Error reading from Wayland connection: {}", e);
-                    app_state.running = false;
-                    return Err(());
-                }
-            }
-        }
-        Err(e) => { // Handle Err case from prepare_read
-            log::error!("Failed to prepare_read Wayland connection in event handler: {}", e);
-            app_state.running = false;
-            return Err(());
-        }
-    }
-    Ok(())
-}
-
-fn handle_libinput_events(app_state: &mut AppState) {
-    if let Some(ref mut context) = app_state.input_context {
-        if context.dispatch().is_err() {
-            log::error!("Libinput dispatch error");
-        }
-        while let Some(event) = context.next() {
-            if let LibinputEvent::Keyboard(KeyboardEvent::Key(key_event)) = event {
-                let key_code = key_event.key();
-                let pressed = key_event.key_state() == KeyState::Pressed;
-                if let Some(current_state) = app_state.key_states.get_mut(&key_code) {
-                    if *current_state != pressed {
-                        *current_state = pressed;
-                        app_state.needs_redraw = true;
-                        log::debug!("Key {} state changed to: {}", key_code, pressed);
-                    }
-                }
-            }
-        }
-    }
-}
-
-// Helper to log if input devices are inaccessible after attempting to assign seat
-// This is a common issue and providing a hint can be useful.
-// This function is called after `udev_assign_seat` has already been attempted.
-fn log_if_input_device_access_denied(app_config: &AppConfig, input_context_is_some: bool) {
-    // This function serves as a general reminder if input is configured but might not be working,
-    // prompting the user to check earlier, more specific error logs.
-    if !app_config.key.is_empty() && input_context_is_some {
-        // If we have an input_context and keys are configured, remind to check for device open errors.
+fn log_if_input_device_access_denied(app_config_ref: &AppConfig, input_context_is_some: bool) {
+    if !app_config_ref.key.is_empty() && input_context_is_some {
         log::info!(
             "Libinput context was initialized. If keys do not respond, please check previous log messages \
             for any 'Failed to open path' errors from the input system. These errors often indicate \
             permission issues (e.g., the user running the application may not be in the 'input' group)."
         );
-    } else if !app_config.key.is_empty() && !input_context_is_some {
-        // If keys are configured but there's no input_context, it means the initial udev_assign_seat likely failed.
-        // The error for that failure would have been logged already by the caller.
+    } else if !app_config_ref.key.is_empty() && !input_context_is_some {
         log::warn!(
             "Key input is configured in keys.toml, but the libinput context could not be initialized \
             (see previous errors). Key press/release events will not be monitored."
         );
     }
-    // If app_config.key is empty, no warning is needed as no input is expected.
 }
