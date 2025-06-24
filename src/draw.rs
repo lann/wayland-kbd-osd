@@ -2,8 +2,6 @@
 
 use cairo::{Context, FontFace as CairoFontFace};
 
-use crate::config::parse_color_string; // Only parse_color_string is needed for background
-
 // Struct to hold key properties for drawing (calculated from KeyConfig and AppState)
 // This struct is prepared by AppState::draw and passed to paint_all_keys
 #[derive(Debug)]
@@ -175,31 +173,16 @@ pub fn draw_single_key_cairo(ctx: &Context, key: &KeyDisplay) {
 pub fn paint_all_keys(
     ctx: &Context,
     keys_to_draw: &Vec<KeyDisplay>,
-    bg_color_str: &str,
+    background_color: (f64, f64, f64, f64), // Changed from &str to tuple
     font_face: &CairoFontFace, // Font face is now passed in
 ) {
-    // Clear the surface with configured background color
-    match parse_color_string(bg_color_str) {
-        Ok((r, g, b, a)) => {
-            ctx.save().unwrap();
-            ctx.set_source_rgba(r, g, b, a);
-            ctx.set_operator(cairo::Operator::Source);
-            ctx.paint().expect("Cairo paint (clear) failed");
-            ctx.restore().unwrap();
-        }
-        Err(e) => {
-            log::error!(
-                "Failed to parse background_color_inactive '{}': {}. Using default transparent.",
-                bg_color_str,
-                e
-            );
-            ctx.save().unwrap();
-            ctx.set_source_rgba(0.0, 0.0, 0.0, 0.0); // Transparent
-            ctx.set_operator(cairo::Operator::Source);
-            ctx.paint().expect("Cairo paint (clear fallback) failed");
-            ctx.restore().unwrap();
-        }
-    }
+    // Clear the surface with the provided background color tuple
+    let (r, g, b, a) = background_color;
+    ctx.save().unwrap();
+    ctx.set_source_rgba(r, g, b, a);
+    ctx.set_operator(cairo::Operator::Source); // Ensure it overwrites
+    ctx.paint().expect("Cairo paint (clear) failed");
+    ctx.restore().unwrap();
 
     if keys_to_draw.is_empty() {
         log::warn!("No keys to draw.");

@@ -48,9 +48,13 @@ struct Cli {
     #[clap(long, value_parser, default_value = "keys.toml")]
     config_path: String,
 
-    /// Run in overlay mode (requires compositor support for wlr-layer-shell)
+    /// Run in window mode instead of the default overlay mode
     #[clap(long)]
-    overlay: bool,
+    window: bool,
+
+    /// Set the window background color (e.g., #RRGGBBAA, #RGB)
+    #[clap(long, default_value = "#000000FF")]
+    window_color: String,
 }
 
 fn main() {
@@ -183,7 +187,20 @@ fn main() {
     let mut event_queue = conn.new_event_queue();
     let qh = event_queue.handle();
 
-    let mut app_state = AppState::new(app_config.clone());
+    // Parse window_color here so we can pass it to AppState
+    let parsed_window_color = match config::parse_color_string(&cli.window_color) {
+        Ok(color) => color,
+        Err(e) => {
+            eprintln!(
+                "Error parsing --window-color value '{}': {}. Using default black.",
+                cli.window_color, e
+            );
+            // Default to opaque black on error
+            config::parse_color_string("#000000FF").unwrap()
+        }
+    };
+
+    let mut app_state = AppState::new(app_config.clone(), cli.window, parsed_window_color);
 
     let _registry = conn.display().get_registry(&qh, ());
 
@@ -246,8 +263,9 @@ fn main() {
         .create_surface(&qh, ());
     app_state.surface = Some(surface.clone());
 
-    if cli.overlay {
-        log::info!("Overlay mode requested. Attempting to use wlr-layer-shell.");
+    // If not in window mode, then it's overlay mode (default)
+    if !cli.window {
+        log::info!("Overlay mode active (default). Attempting to use wlr-layer-shell.");
         if let Some(layer_shell) = app_state.layer_shell.as_ref() {
             let mut selected_wl_output_proxy: Option<&wl_output::WlOutput> = None;
 
@@ -380,7 +398,9 @@ fn main() {
             app_state.layer_surface = Some(layer_surface_obj);
             log::info!("Created and configured layer surface for overlay mode.");
         } else {
-            log::error!("--overlay flag was used, but zwlr_layer_shell_v1 is not available from the compositor. Falling back to normal window mode.");
+            log::error!("Overlay mode active, but zwlr_layer_shell_v1 is not available from the compositor. Falling back to XDG window mode.");
+            // Set app_state.is_window_mode to true as we are falling back
+            app_state.is_window_mode = true;
             let xdg_surface_proxy =
                 app_state
                     .xdg_wm_base
@@ -388,10 +408,10 @@ fn main() {
                     .unwrap()
                     .get_xdg_surface(&surface, &qh, ());
             let toplevel = xdg_surface_proxy.get_toplevel(&qh, ());
-            toplevel.set_title("Wayland Keyboard OSD (Fallback)".to_string());
+            toplevel.set_title("Wayland Keyboard OSD (Fallback Window)".to_string());
         }
-    } else {
-        log::info!("Normal window mode requested (XDG shell).");
+    } else { // This block now means cli.window is true
+        log::info!("Window mode requested via --window (XDG shell).");
         let xdg_surface_proxy =
             app_state
                 .xdg_wm_base
@@ -409,7 +429,8 @@ fn main() {
         log::error!("Error during roundtrip after surface commit (waiting for initial configure).");
     }
 
-    if cli.overlay && app_state.layer_shell.is_some() {
+    // Only attempt to configure layer surface size if in overlay mode and layer shell is available
+    if !app_state.is_window_mode && app_state.layer_shell.is_some() {
         log::info!("Initial layer surface setup complete. Attempting to configure size based on currently known screen dimensions...");
         app_state.attempt_configure_layer_surface_size();
 
