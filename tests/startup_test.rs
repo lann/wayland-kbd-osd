@@ -45,13 +45,11 @@ mod tests {
         );
 
         let stderr_thread = thread::spawn(move || {
-            for line_result in stderr_reader.lines() {
-                if let Ok(line) = line_result {
-                    println!("[SWAY STDERR] {}", line); // Print sway's stderr for debugging
-                    let mut stderr_lock = sway_stderr_clone.lock().unwrap();
-                    stderr_lock.push_str(&line);
-                    stderr_lock.push('\n');
-                }
+            for line in stderr_reader.lines().map_while(Result::ok) {
+                println!("[SWAY STDERR] {}", line); // Print sway's stderr for debugging
+                let mut stderr_lock = sway_stderr_clone.lock().unwrap();
+                stderr_lock.push_str(&line);
+                stderr_lock.push('\n');
             }
         });
 
@@ -63,10 +61,8 @@ mod tests {
                 .expect("Failed to get sway stdout"),
         );
         let stdout_thread = thread::spawn(move || {
-            for line_result in stdout_reader.lines() {
-                if let Ok(line) = line_result {
-                    println!("[SWAY STDOUT] {}", line);
-                }
+            for line in stdout_reader.lines().map_while(Result::ok) {
+                println!("[SWAY STDOUT] {}", line);
             }
         });
 
@@ -213,13 +209,11 @@ mod tests {
         );
 
         let stderr_thread = thread::spawn(move || {
-            for line_result in stderr_reader.lines() {
-                if let Ok(line) = line_result {
-                    println!("[SWAY_OVERLAY STDERR] {}", line); // Print sway's stderr for debugging
-                    let mut stderr_lock = sway_stderr_clone.lock().unwrap();
-                    stderr_lock.push_str(&line);
-                    stderr_lock.push('\n');
-                }
+            for line in stderr_reader.lines().map_while(Result::ok) {
+                println!("[SWAY_OVERLAY STDERR] {}", line); // Print sway's stderr for debugging
+                let mut stderr_lock = sway_stderr_clone.lock().unwrap();
+                stderr_lock.push_str(&line);
+                stderr_lock.push('\n');
             }
         });
 
@@ -231,10 +225,8 @@ mod tests {
                 .expect("Failed to get sway stdout"),
         );
         let stdout_thread = thread::spawn(move || {
-            for line_result in stdout_reader.lines() {
-                if let Ok(line) = line_result {
-                    println!("[SWAY_OVERLAY STDOUT] {}", line);
-                }
+            for line in stdout_reader.lines().map_while(Result::ok) {
+                println!("[SWAY_OVERLAY STDOUT] {}", line);
             }
         });
 

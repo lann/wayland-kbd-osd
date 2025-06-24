@@ -16,7 +16,6 @@ mod wayland;
 // External Crate Imports
 use clap::Parser;
 use freetype::Library as FreeTypeLibrary; // Used for --check
- // Used for input::Libinput::new_with_udev by event.rs, but main needs it to create the context
 
 // Using items from the new modules
 use config::{
@@ -26,7 +25,6 @@ use config::{
     validate_config,
     AppConfig,
     DEFAULT_TEXT_SIZE_UNSCALED,
-    // parse_color_string as config_parse_color_string, // aliased, but print_overlay_config_for_check uses config::parse_color_string
 };
 use event::MyLibinputInterface;
 // handle_libinput_events is called via event::handle_libinput_events
@@ -34,11 +32,8 @@ use event::MyLibinputInterface;
 use wayland::AppState;
 
 // Protocol imports for main function logic (surface creation, layer shell)
-use wayland_client::protocol::wl_output; // For selected_wl_output_proxy
-                                         // The following are not directly used in main after refactor, they are used within wayland.rs
-                                         // use wayland_client::protocol::{wl_surface, wl_compositor, wl_shm, wl_registry};
-                                         // use wayland_protocols::xdg::shell::client::{xdg_wm_base, xdg_surface, xdg_toplevel};
 use wayland_client::backend::WaylandError;
+use wayland_client::protocol::wl_output; // For selected_wl_output_proxy
 use wayland_protocols_wlr::layer_shell::v1::client::{zwlr_layer_shell_v1, zwlr_layer_surface_v1};
 
 /// Command-line arguments
@@ -61,12 +56,16 @@ struct Cli {
 fn main() {
     let cli = Cli::parse();
 
-    if let Some(e) = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
-        .try_init()
-        .err() { eprintln!(
-                "Failed to initialize logger: {}. Continuing without detailed logging for --check.",
-                e
-            ) }
+    if let Some(e) =
+        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
+            .try_init()
+            .err()
+    {
+        eprintln!(
+            "Failed to initialize logger: {}. Continuing without detailed logging for --check.",
+            e
+        )
+    }
 
     let app_config: AppConfig = match load_and_process_config(&cli.config_path) {
         Ok(config) => config,
@@ -480,7 +479,9 @@ fn main() {
         } else if ret == 0 {
             // Timeout
         } else {
-            if (fds[WAYLAND_FD_IDX].revents & libc::POLLIN) != 0 && wayland::handle_wayland_events(&conn, &mut event_queue, &mut app_state).is_err() {
+            if (fds[WAYLAND_FD_IDX].revents & libc::POLLIN) != 0
+                && wayland::handle_wayland_events(&conn, &mut event_queue, &mut app_state).is_err()
+            {
                 break;
             }
             if (fds[WAYLAND_FD_IDX].revents & (libc::POLLERR | libc::POLLHUP)) != 0 {

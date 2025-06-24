@@ -1,5 +1,5 @@
 // Wayland interaction
- // Added for input::Libinput
+// Added for input::Libinput
 use wayland_client::protocol::{
     wl_buffer, wl_compositor, wl_output, wl_registry, wl_shm, wl_shm_pool, wl_surface,
 };
