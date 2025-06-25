@@ -19,6 +19,7 @@ use crate::config::{
     DEFAULT_TEXT_SIZE_UNSCALED,
 };
 use crate::draw::{self, KeyDisplay}; // Import draw module and KeyDisplay
+use crate::wayland_drawing_cache::DrawingCache; // Import DrawingCache
 
 // Graphics and Font rendering (needed for font loading in AppState::draw)
 use cairo::FontFace as CairoFontFace;
@@ -59,28 +60,20 @@ pub struct AppState {
     pub config: AppConfig,
     pub key_states: HashMap<u32, bool>,
     pub needs_redraw: bool,
-    pub last_draw_width: i32,
-    pub last_draw_height: i32,
-    pub cached_scale: f32,
-    pub cached_offset_x: f32,
-    pub cached_offset_y: f32,
-    pub layout_cache_valid: bool,
+    pub drawing_cache: DrawingCache,
     pub initial_surface_size_set: bool,
     pub target_output_identifier: Option<String>,
     pub identified_target_wl_output_name: Option<u32>,
     pub frame_callback: Option<wl_callback::WlCallback>,
-
-    // New fields for mode and window color
     pub is_window_mode: bool,
     pub window_background_color: (f64, f64, f64, f64),
-    // pub active_modifiers: u32, // If needed later for overlay active state
 }
 
 impl AppState {
     pub fn new(
         app_config: AppConfig,
-        is_window_mode: bool, // New parameter
-        window_background_color: (f64, f64, f64, f64), // New parameter
+        is_window_mode: bool,
+        window_background_color: (f64, f64, f64, f64),
     ) -> Self {
         let mut key_states_map = HashMap::new();
         for key_conf in app_config.key.iter() {
@@ -105,21 +98,13 @@ impl AppState {
             config: app_config.clone(),
             key_states: key_states_map,
             needs_redraw: true,
-            last_draw_width: 0,
-            last_draw_height: 0,
-            cached_scale: 1.0,
-            cached_offset_x: 0.0,
-            cached_offset_y: 0.0,
-            layout_cache_valid: false,
+            drawing_cache: DrawingCache::default(),
             initial_surface_size_set: false,
             target_output_identifier: app_config.overlay.screen.clone(),
             identified_target_wl_output_name: None,
             frame_callback: None,
-
-            // Initialize new fields
             is_window_mode,
             window_background_color,
-            // active_modifiers: 0, // If added
         }
     }
 
@@ -248,12 +233,9 @@ impl AppState {
         if target_h == 0 && screen_height_px > 0 {
             target_h = (screen_height_px as f32 * 0.1).round().max(1.0) as u32;
         }
-        if target_w == 0 {
-            target_w = 100;
-        }
-        if target_h == 0 {
-            target_h = 50;
-        }
+        if target_w == 0 { target_w = 100; }
+        if target_h == 0 { target_h = 50; }
+
         log::info!("Setting layer surface size: {}x{}", target_w, target_h);
         if let Some(ls) = self.layer_surface.as_ref() {
             ls.set_size(target_w, target_h);
@@ -284,38 +266,40 @@ impl AppState {
         ((max_x - min_x).max(0.0), (max_y - min_y).max(0.0))
     }
 
-    pub fn draw(&mut self, qh: &QueueHandle<AppState>) {
-        if self.surface.is_none() || self.shm.is_none() || self.compositor.is_none() {
-            log::error!("Draw: missing Wayland objects.");
-            return;
-        }
-        let surface = self.surface.as_ref().unwrap();
-        let shm = self.shm.as_ref().unwrap();
-        let width = self.configured_width;
-        let height = self.configured_height;
-        let stride = width * 4;
-        let size = (stride * height) as usize;
+    fn prepare_drawing_surface<'a>(
+        &'a mut self,
+        qh: &QueueHandle<AppState>,
+        width: i32,
+        height: i32,
+        stride: i32,
+    ) -> Result<(cairo::Context, wl_buffer::WlBuffer, cairo::ImageSurface), String> {
+        let shm = self.shm.as_ref().ok_or_else(|| "SHM global not available".to_string())?;
+        let surface_size_bytes = (stride * height) as usize;
+
         if self.temp_file.is_none()
             || self.mmap.is_none()
-            || self.mmap.as_ref().is_none_or(|m| m.len() < size)
+            || self.mmap.as_ref().map_or(true, |m| m.len() < surface_size_bytes)
         {
-            if let Some(b) = self.buffer.take() {
-                b.destroy();
+            if let Some(old_buffer) = self.buffer.take() {
+                old_buffer.destroy();
             }
             self.mmap = None;
             self.temp_file = None;
-            let tf = tempfile::tempfile().expect("SHM tempfile creation failed");
-            tf.set_len(size as u64)
-                .expect("SHM tempfile set_len failed");
-            self.mmap = Some(unsafe { MmapMut::map_mut(&tf).expect("SHM mmap failed") });
-            self.temp_file = Some(tf);
+
+            let temp_file = tempfile::tempfile().map_err(|e| format!("SHM tempfile creation failed: {}", e))?;
+            temp_file.set_len(surface_size_bytes as u64).map_err(|e| format!("SHM tempfile set_len failed: {}", e))?;
+
+            self.mmap = Some(unsafe { MmapMut::map_mut(&temp_file).map_err(|e| format!("SHM mmap failed: {}", e))? });
+            self.temp_file = Some(temp_file);
         }
+
         let fd = self.temp_file.as_ref().unwrap().as_raw_fd();
-        let pool = shm.create_pool(fd, size as i32, qh, ());
-        let buffer = pool.create_buffer(0, width, height, stride, wl_shm::Format::Argb8888, qh, ());
+        let pool = shm.create_pool(fd, surface_size_bytes as i32, qh, ());
+        let new_buffer = pool.create_buffer(0, width, height, stride, wl_shm::Format::Argb8888, qh, ());
         pool.destroy();
+
         let mmap_ptr = self.mmap.as_mut().unwrap().as_mut_ptr();
-        let cairo_surface = match unsafe {
+        let cairo_surface = unsafe {
             cairo::ImageSurface::create_for_data_unsafe(
                 mmap_ptr,
                 cairo::Format::ARgb32,
@@ -323,107 +307,96 @@ impl AppState {
                 height,
                 stride,
             )
-        } {
-            Ok(s) => s,
-            Err(e) => {
-                log::error!("Cairo ImageSurface creation failed: {:?}", e);
-                surface.attach(Some(&buffer), 0, 0);
-                surface.damage_buffer(0, 0, width, height);
-                surface.commit();
-                if let Some(ob) = self.buffer.replace(buffer) {
-                    ob.destroy();
-                }
-                return;
-            }
-        };
-        let ctx = cairo::Context::new(&cairo_surface).expect("Cairo Context creation failed");
+        }.map_err(|e| format!("Cairo ImageSurface creation failed: {:?}", e))?;
 
-        // --- Start of logic moved from draw::render_keyboard_to_context ---
-        let scale: f32;
-        let offset_x: f32;
-        let offset_y: f32;
-        if self.layout_cache_valid
-            && self.configured_width == self.last_draw_width
-            && self.configured_height == self.last_draw_height
-        {
-            scale = self.cached_scale;
-            offset_x = self.cached_offset_x;
-            offset_y = self.cached_offset_y;
-        } else {
-            let (layout_w, layout_h) = self.get_key_layout_bounds(); // Use existing method
-            let padding = if self.config.overlay.size_width.is_some()
-                || self.config.overlay.size_height.is_some()
-            {
-                2.0
+        let cairo_context = cairo::Context::new(&cairo_surface).map_err(|e| format!("Cairo Context creation failed: {:?}", e))?;
+
+        Ok((cairo_context, new_buffer, cairo_surface))
+    }
+
+    fn request_frame_callback_if_needed(&mut self, qh: &QueueHandle<AppState>) {
+        if self.frame_callback.is_none() {
+            if let Some(surface) = self.surface.as_ref() {
+                log::trace!("Requesting frame callback.");
+                let callback = surface.frame(qh, ());
+                self.frame_callback = Some(callback);
             } else {
-                (width.min(height) as f32 * 0.05).max(5.0)
-            };
-            let draw_w = (width as f32 - 2.0 * padding).max(0.0);
-            let draw_h = (height as f32 - 2.0 * padding).max(0.0);
-            let scale_x = if layout_w > 0.0 {
-                draw_w / layout_w
-            } else {
-                1.0
-            };
-            let scale_y = if layout_h > 0.0 {
-                draw_h / layout_h
-            } else {
-                1.0
-            };
-            scale = scale_x.min(scale_y).max(0.01);
-            let scaled_layout_w = layout_w * scale;
-            let scaled_layout_h = layout_h * scale;
-            let min_coord_x = self
-                .config
-                .key
-                .iter()
-                .map(|k| k.left)
-                .fold(f32::MAX, |a, b| a.min(b)); // Recalc min_coord for offset
-            let min_coord_y = self
-                .config
-                .key
-                .iter()
-                .map(|k| k.top)
-                .fold(f32::MAX, |a, b| a.min(b));
-            offset_x = padding + (draw_w - scaled_layout_w) / 2.0 - (min_coord_x * scale);
-            offset_y = padding + (draw_h - scaled_layout_h) / 2.0 - (min_coord_y * scale);
-            self.cached_scale = scale;
-            self.cached_offset_x = offset_x;
-            self.cached_offset_y = offset_y;
-            self.last_draw_width = width;
-            self.last_draw_height = height;
-            self.layout_cache_valid = true;
+                log::warn!("Cannot request frame callback: surface is None.");
+            }
+        }
+    }
+
+    fn calculate_layout_parameters(&mut self, surface_width: i32, surface_height: i32) -> (f32, f32, f32) {
+        if self.drawing_cache.is_valid_for_dimensions(surface_width, surface_height) {
+            return (
+                self.drawing_cache.cached_scale,
+                self.drawing_cache.cached_offset_x,
+                self.drawing_cache.cached_offset_y,
+            );
         }
 
-        let font_data: &[u8] = include_bytes!("../default-font/DejaVuSansMono.ttf");
-        let ft_library = FreeTypeLibrary::init().expect("FT init failed");
-        let ft_face = ft_library
-            .new_memory_face(font_data.to_vec(), 0)
-            .expect("FT face load failed");
-        let cairo_font_face =
-            CairoFontFace::create_from_ft(&ft_face).expect("Cairo FT face creation failed");
+        let (layout_w, layout_h) = self.get_key_layout_bounds();
+        let padding = if self.config.overlay.size_width.is_some()
+            || self.config.overlay.size_height.is_some()
+        {
+            2.0
+        } else {
+            (surface_width.min(surface_height) as f32 * 0.05).max(5.0)
+        };
 
+        let drawable_width = (surface_width as f32 - 2.0 * padding).max(0.0);
+        let drawable_height = (surface_height as f32 - 2.0 * padding).max(0.0);
+
+        let scale = if layout_w > 0.0 && layout_h > 0.0 {
+            let scale_x = drawable_width / layout_w;
+            let scale_y = drawable_height / layout_h;
+            scale_x.min(scale_y).max(0.01)
+        } else {
+            1.0
+        };
+
+        let scaled_layout_width = layout_w * scale;
+        let scaled_layout_height = layout_h * scale;
+
+        let min_coord_x = self.config.key.iter().map(|k| k.left).fold(f32::INFINITY, |a, b| a.min(b));
+        let min_coord_y = self.config.key.iter().map(|k| k.top).fold(f32::INFINITY, |a, b| a.min(b));
+
+        let actual_min_coord_x = if min_coord_x.is_finite() { min_coord_x } else { 0.0 };
+        let actual_min_coord_y = if min_coord_y.is_finite() { min_coord_y } else { 0.0 };
+
+        let offset_x = padding + (drawable_width - scaled_layout_width) / 2.0 - (actual_min_coord_x * scale);
+        let offset_y = padding + (drawable_height - scaled_layout_height) / 2.0 - (actual_min_coord_y * scale);
+
+        self.drawing_cache.update(surface_width, surface_height, scale, offset_x, offset_y);
+        (scale, offset_x, offset_y)
+    }
+
+    fn prepare_keys_for_drawing(&self, scale: f32, offset_x: f32, offset_y: f32) -> Vec<KeyDisplay> {
         let default_fallback_color = (0.1, 0.1, 0.1, 1.0);
-        let key_outline_color = parse_color_string(&self.config.overlay.default_key_outline_color)
-            .unwrap_or(default_fallback_color);
+
+        let key_outline_color =
+            parse_color_string(&self.config.overlay.default_key_outline_color)
+                .unwrap_or(default_fallback_color);
         let default_key_text_color =
             parse_color_string(&self.config.overlay.default_key_text_color)
                 .unwrap_or(default_fallback_color);
         let active_key_bg_color =
             parse_color_string(&self.config.overlay.active_key_background_color)
                 .unwrap_or((0.6, 0.6, 0.9, 1.0));
-        let active_key_text_color = parse_color_string(&self.config.overlay.active_key_text_color)
-            .unwrap_or(default_key_text_color);
+        let active_key_text_color =
+            parse_color_string(&self.config.overlay.active_key_text_color)
+                .unwrap_or(default_key_text_color);
+
         let ultimate_inactive_bg_fallback =
             parse_color_string(&default_key_background_color_string())
                 .unwrap_or((0.3, 0.3, 0.3, 0.5));
 
-        let keys_to_draw: Vec<KeyDisplay> = self
-            .config
+        self.config
             .key
             .iter()
             .map(|kc| {
                 let is_pressed = *self.key_states.get(&kc.keycode).unwrap_or(&false);
+
                 let bg_color = if is_pressed {
                     active_key_bg_color
                 } else {
@@ -435,23 +408,21 @@ impl AppState {
                                 .unwrap_or(ultimate_inactive_bg_fallback)
                         })
                 };
+
                 let text_color = if is_pressed {
                     active_key_text_color
                 } else {
                     default_key_text_color
                 };
+
                 KeyDisplay {
                     text: kc.name.clone(),
                     center_x: (kc.left + kc.width / 2.0) * scale + offset_x,
                     center_y: (kc.top + kc.height / 2.0) * scale + offset_y,
                     width: kc.width * scale,
                     height: kc.height * scale,
-                    corner_radius: kc.corner_radius.unwrap_or(DEFAULT_CORNER_RADIUS_UNSCALED)
-                        * scale,
-                    border_thickness: kc
-                        .border_thickness
-                        .unwrap_or(DEFAULT_BORDER_THICKNESS_UNSCALED)
-                        * scale,
+                    corner_radius: kc.corner_radius.unwrap_or(DEFAULT_CORNER_RADIUS_UNSCALED) * scale,
+                    border_thickness: kc.border_thickness.unwrap_or(DEFAULT_BORDER_THICKNESS_UNSCALED) * scale,
                     rotation_degrees: kc.rotation_degrees.unwrap_or(DEFAULT_ROTATION_DEGREES),
                     text_size: kc.text_size.unwrap_or(DEFAULT_TEXT_SIZE_UNSCALED) * scale,
                     border_color: key_outline_color,
@@ -459,15 +430,54 @@ impl AppState {
                     text_color,
                 }
             })
-            .collect();
-        // --- End of logic moved from draw::render_keyboard_to_context ---
+            .collect()
+    }
+
+    pub fn draw(&mut self, qh: &QueueHandle<AppState>) {
+        // Clone the surface proxy to avoid borrow checker issues with later &mut self calls.
+        // wl_surface::WlSurface is typically a lightweight handle (Rc-like).
+        let surface_proxy = match self.surface.as_ref().cloned() {
+            Some(s_proxy) => s_proxy,
+            None => {
+                log::error!("Draw called but Wayland surface is None.");
+                return;
+            }
+        };
+
+        if self.shm.is_none() || self.compositor.is_none() {
+            log::error!("Draw: missing essential Wayland globals (SHM or Compositor).");
+            return;
+        }
+
+        let width = self.configured_width;
+        let height = self.configured_height;
+        let stride = width * 4;
+
+        let cairo_ctx_new_buffer_surface = self.prepare_drawing_surface(qh, width, height, stride);
+
+        let (ctx, new_wl_buffer, cairo_image_surface) = match cairo_ctx_new_buffer_surface {
+            Ok((ctx, buffer, image_surface)) => (ctx, buffer, image_surface),
+            Err(e) => {
+                log::error!("Failed to prepare drawing surface: {}", e);
+                return;
+            }
+        };
+
+        let (scale, offset_x, offset_y) = self.calculate_layout_parameters(width, height);
+        let keys_to_draw = self.prepare_keys_for_drawing(scale, offset_x, offset_y);
+
+        let font_data: &[u8] = include_bytes!("../default-font/DejaVuSansMono.ttf");
+        let ft_library = FreeTypeLibrary::init().expect("FT init failed");
+        let ft_face = ft_library
+            .new_memory_face(font_data.to_vec(), 0)
+            .expect("FT face load failed");
+        let cairo_font_face =
+            CairoFontFace::create_from_ft(&ft_face).expect("Cairo FT face creation failed");
 
         let final_background_color: (f64, f64, f64, f64);
         if self.is_window_mode {
             final_background_color = self.window_background_color;
         } else {
-            // Overlay mode
-            // Consider active state for background if desired, e.g., based on key_states
             let is_overlay_active = self.key_states.values().any(|&pressed| pressed);
             let bg_color_str = if is_overlay_active {
                 &self.config.overlay.background_color_active
@@ -480,36 +490,32 @@ impl AppState {
                     bg_color_str,
                     e
                 );
-                (0.0, 0.0, 0.0, 0.0) // Default to transparent black
+                (0.0, 0.0, 0.0, 0.0)
             });
         }
 
         draw::paint_all_keys(
             &ctx,
             &keys_to_draw,
-            final_background_color, // Pass the tuple
+            final_background_color,
             &cairo_font_face,
         );
 
-        cairo_surface.flush();
-        log::debug!("Draw complete.");
-        surface.attach(Some(&buffer), 0, 0);
-        surface.damage_buffer(0, 0, width, height);
-        surface.commit();
-        if let Some(old_buffer) = self.buffer.replace(buffer) {
+        // Ensure all drawing operations are flushed to the underlying SHM buffer.
+        // The cairo_image_surface is the direct representation of that buffer.
+        cairo_image_surface.flush();
+        log::debug!("Draw complete. Attaching buffer and committing surface.");
+
+        surface_proxy.attach(Some(&new_wl_buffer), 0, 0);
+        surface_proxy.damage_buffer(0, 0, width, height); // Damage the entire buffer
+        surface_proxy.commit();
+
+        // Replace the old buffer with the new one, destroying the old one.
+        if let Some(old_buffer) = self.buffer.replace(new_wl_buffer) {
             old_buffer.destroy();
         }
 
-        // After drawing and committing, if no frame callback is already pending, request one.
-        if self.frame_callback.is_none() {
-            if let Some(surface_ref) = self.surface.as_ref() {
-                let callback = surface_ref.frame(qh, ());
-                self.frame_callback = Some(callback);
-                log::trace!("Frame callback requested from AppState::draw");
-            } else {
-                log::warn!("AppState::draw: Cannot request frame callback, surface is None after draw logic.");
-            }
-        }
+        self.request_frame_callback_if_needed(qh);
     }
 }
 
@@ -537,9 +543,9 @@ impl Dispatch<zwlr_layer_surface_v1::ZwlrLayerSurfaceV1, ()> for AppState {
                 }
                 ls.ack_configure(serial);
                 state.needs_redraw = true;
-                if state.surface.is_some() {
+                if state.surface.is_some() { // Ensure surface exists before drawing
                     state.draw(qh);
-                    state.needs_redraw = false;
+                    state.needs_redraw = false; // draw() handles further redraw logic via frame callbacks
                 }
             }
             zwlr_layer_surface_v1::Event::Closed => {
@@ -577,13 +583,12 @@ impl Dispatch<xdg_surface::XdgSurface, ()> for AppState {
     ) {
         if let xdg_surface::Event::Configure { serial, .. } = e {
             p.ack_configure(serial);
-            s.needs_redraw = true; // Signal that a redraw is needed
+            s.needs_redraw = true;
             if s.surface.is_some() {
-                // Calling draw here will perform the initial draw and schedule the first frame callback.
-                // The needs_redraw flag will be handled by the frame callback logic thereafter.
                 s.draw(qh);
             } else {
                 log::warn!("XDGSurface Configure: surface is None, cannot draw or schedule frame callback yet.");
+                s.request_frame_callback_if_needed(qh);
             }
         }
     }
@@ -695,6 +700,8 @@ impl Dispatch<wl_registry::WlRegistry, ()> for AppState {
             state.outputs.retain(|(id, _, _, _)| *id != name);
             if state.identified_target_wl_output_name == Some(name) {
                 state.identified_target_wl_output_name = None;
+                state.drawing_cache.invalidate(); // Invalidate cache if target output is gone
+                state.needs_redraw = true;
             }
         }
     }
@@ -711,6 +718,8 @@ impl Dispatch<wl_output::WlOutput, ()> for AppState {
         if let wl_output::Event::Name { name } = e {
             log::debug!("wl_output {:?} Name: {}", o.id(), name);
         }
+        // Other events like 'scale' or 'geometry' could trigger cache invalidation
+        // if they affect how the OSD should be drawn.
     }
 }
 impl Dispatch<zxdg_output_manager_v1::ZxdgOutputManagerV1, ()> for AppState {
@@ -734,41 +743,66 @@ impl Dispatch<zxdg_output_v1::ZxdgOutputV1, ()> for AppState {
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
-        let opt = state
+        let output_global_name = state
+            .outputs
+            .iter()
+            .find(|(_, _, xo, _)| xo.as_ref() == Some(xdg_o))
+            .map(|(id, _, _, _)| *id);
+
+        if let Some((id, _, _, info)) = state
             .outputs
             .iter_mut()
-            .find(|(_, _, xo, _)| xo.as_ref() == Some(xdg_o));
-        if let Some((id, _, _, info)) = opt {
+            .find(|(_, _, xo, _)| xo.as_ref() == Some(xdg_o))
+        {
+            let mut changed = false;
             match e {
                 zxdg_output_v1::Event::LogicalSize { width, height } => {
-                    info.logical_width = width;
-                    info.logical_height = height;
-                    if !state.initial_surface_size_set
-                        && (state.identified_target_wl_output_name.is_none()
-                            || state.identified_target_wl_output_name == Some(*id))
-                        && info.logical_width > 0
-                        && info.logical_height > 0
-                    {
-                        state.attempt_configure_layer_surface_size();
-                    }
-                }
-                zxdg_output_v1::Event::Done => {
-                    if !state.initial_surface_size_set
-                        && (state.identified_target_wl_output_name.is_none()
-                            || state.identified_target_wl_output_name == Some(*id))
-                        && info.logical_width > 0
-                        && info.logical_height > 0
-                    {
-                        state.attempt_configure_layer_surface_size();
+                    if info.logical_width != width || info.logical_height != height {
+                        log::debug!("Output ID {} ({:?}) logical size changed: {}x{} -> {}x{}", id, info.name.as_deref().unwrap_or("?"), info.logical_width, info.logical_height, width, height);
+                        info.logical_width = width;
+                        info.logical_height = height;
+                        changed = true;
                     }
                 }
                 zxdg_output_v1::Event::Name { name } => {
-                    info.name = Some(name);
+                    if info.name.as_deref() != Some(&name) {
+                        log::debug!("Output ID {} name changed: {:?} -> {}", id, info.name.as_deref().unwrap_or("?"), name);
+                        info.name = Some(name);
+                        changed = true; // Name change might affect target_output_identifier logic
+                    }
                 }
                 zxdg_output_v1::Event::Description { description } => {
-                    info.description = Some(description);
+                     if info.description.as_deref() != Some(&description) {
+                        log::debug!("Output ID {} description changed: {:?} -> {}", id, info.description.as_deref().unwrap_or("?"), description);
+                        info.description = Some(description);
+                        changed = true; // Description change might affect target_output_identifier logic
+                    }
+                }
+                zxdg_output_v1::Event::Done => {
+                    // The 'Done' event signals the end of a batch of updates.
+                    // If any property that affects layout (like logical size of the target output)
+                    // has changed, we might need to re-evaluate.
+                    // The 'changed' flag handles this for properties updated above.
                 }
                 _ => {}
+            }
+
+            if changed {
+                 // If this output is our target, or if no target is set (compositor chooses),
+                 // then a change in its properties might require re-calculating OSD size/position.
+                let is_targeted_output = state.identified_target_wl_output_name == Some(*id);
+                let no_target_and_this_is_an_output = state.identified_target_wl_output_name.is_none() && output_global_name.is_some();
+
+                if is_targeted_output || no_target_and_this_is_an_output {
+                    log::info!("Relevant output (ID: {}) changed. Invalidating drawing cache and marking for redraw.", id);
+                    state.drawing_cache.invalidate(); // Invalidate scale/offset cache
+                    state.initial_surface_size_set = false; // Allow recalculation of layer surface size
+                    state.needs_redraw = true;
+                    // Attempt to reconfigure immediately if possible, otherwise configure on next draw/event
+                    if !state.is_window_mode && state.layer_shell.is_some() && info.logical_width > 0 && info.logical_height > 0 {
+                         state.attempt_configure_layer_surface_size();
+                    }
+                }
             }
         }
     }
@@ -785,44 +819,25 @@ impl Dispatch<wl_callback::WlCallback, ()> for AppState {
     ) {
         if let wl_callback::Event::Done { .. } = event {
             log::trace!("Frame callback done for callback ID: {:?}", callback.id());
-
-            // Clear the stored callback, as it's a one-shot.
             state.frame_callback = None;
 
             if state.needs_redraw {
                 if state.surface.is_some() {
                     log::debug!("Frame callback: needs_redraw is true, calling draw.");
-                    state.draw(qh); // draw() will request a new frame callback
-                    state.needs_redraw = false; // Reset after draw
+                    state.draw(qh);
+                    state.needs_redraw = false;
                 } else {
                     log::warn!("Frame callback: needs_redraw is true, but surface is None. Skipping draw.");
                     state.needs_redraw = false;
-                    // Request a new frame callback even if we skipped draw, to keep the loop alive
-                    // if the surface appears later and needs_redraw is set again.
-                    if let Some(surface) = state.surface.as_ref() {
-                        if state.frame_callback.is_none() {
-                            let callback = surface.frame(qh, ());
-                            state.frame_callback = Some(callback);
-                            log::trace!("Frame callback requested from wl_callback::Done (surface present, draw skipped)");
-                        }
-                    }
+                    state.request_frame_callback_if_needed(qh);
                 }
             } else {
-                // If no redraw was needed, but a frame callback was pending,
-                // we might still want to request another one if the application
-                // expects to draw intermittently.
-                // This ensures that if needs_redraw becomes true later,
-                // a frame callback is already in flight or will be requested.
-                if let Some(surface) = state.surface.as_ref() {
-                    if state.frame_callback.is_none() {
-                        let callback = surface.frame(qh, ());
-                        state.frame_callback = Some(callback);
-                        log::trace!("Frame callback requested from wl_callback::Done (no redraw needed)");
-                    }
-                }
+                state.request_frame_callback_if_needed(qh);
             }
         } else {
-            log::warn!("Received unexpected event on wl_callback: {:?}", event);
+            log::warn!("Received unexpected event on wl_callback: {:?}. Original callback ID: {:?}", event, callback.id());
+            state.frame_callback = None;
+            state.request_frame_callback_if_needed(qh);
         }
     }
 }
@@ -874,18 +889,21 @@ pub fn handle_wayland_events(
         Ok(guard) => match guard.read() {
             Ok(_) => {
                 if event_queue.dispatch_pending(app_state).is_err() {
+                    log::error!("Error dispatching Wayland event queue.");
                     app_state.running = false;
                     return Err(());
                 }
             }
             Err(wayland_client::backend::WaylandError::Io(io_err))
-                if io_err.kind() == std::io::ErrorKind::WouldBlock => {}
-            Err(_) => {
+                if io_err.kind() == std::io::ErrorKind::WouldBlock => {} // Non-blocking read, no events
+            Err(e) => { // Other read error
+                log::error!("Error reading Wayland events: {}", e);
                 app_state.running = false;
                 return Err(());
             }
         },
-        Err(_) => {
+        Err(e) => { // Error preparing to read (e.g., connection closed)
+            log::error!("Error preparing to read Wayland events: {}", e);
             app_state.running = false;
             return Err(());
         }
