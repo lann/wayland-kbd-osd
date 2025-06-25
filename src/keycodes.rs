@@ -1,30 +1,59 @@
 // Based on Linux input-event-codes.h
 // Fetched from: https://raw.githubusercontent.com/torvalds/linux/master/include/uapi/linux/input-event-codes.h
 
+/// Resolves a key name string (e.g., "leftshift", "a", "KP_Enter") to its Linux keycode.
+///
+/// ## Normalization Rules:
+/// Before matching, the input `key_name_str` undergoes normalization:
+/// 1. **Lowercase:** The entire string is converted to lowercase.
+/// 2. **Underscore Removal:** All underscores (`_`) are removed.
+///    (e.g., "keypad_enter" becomes "keypadenter").
+/// 3. **Hyphen Removal (Conditional):** Hyphens (`-`) are removed ONLY IF the string
+///    contains at least one alphabetic character. This heuristic aims to preserve
+///    hyphens in symbolic key names (like "-") while allowing hyphens in aliases
+///    (e.g., "volume-down" becomes "volumedown").
+///    Single character symbols like "-" or "=" will not have their hyphen/equal sign removed.
+///
+/// ## Ambiguous Keys:
+/// Certain common short names for modifier keys are considered ambiguous and will result
+/// in an error. Users must specify the exact version (e.g., "leftshift" instead of "shift").
+/// The ambiguous names checked are:
+/// - "shift"
+/// - "ctrl", "control"
+/// - "alt"
+/// - "meta", "win", "windows", "super"
+///
+/// The function then attempts to match the normalized string against a comprehensive list
+/// of known key names and their corresponding Linux event codes.
 pub fn get_keycode_from_string(key_name_str: &str) -> Result<u32, String> {
     let mut normalized_key_name = key_name_str.to_lowercase();
 
-    // Replace underscores globally
+    // Rule 2: Replace underscores globally
     normalized_key_name = normalized_key_name.replace("_", "");
 
-    // Replace hyphens only if the string is likely an alias rather than a symbol key itself
-    // This is a heuristic: if it contains letters, it's more likely an alias.
-    // Single character symbols like '-' or '=' should not have their hyphen removed.
+    // Rule 3: Replace hyphens only if the string is likely an alias rather than a symbol key itself.
     if normalized_key_name.chars().any(char::is_alphabetic) {
         normalized_key_name = normalized_key_name.replace("-", "");
     }
 
     // Handle ambiguous keys first (using the already partially normalized name)
     match normalized_key_name.as_str() {
-        "shift" => return Err("Ambiguous key name 'shift'. Please specify one of: leftshift, rightshift".to_string()),
-        "ctrl" | "control" => return Err("Ambiguous key name 'ctrl'/'control'. Please specify one of: leftctrl, rightctrl".to_string()),
-        "alt" => return Err("Ambiguous key name 'alt'. Please specify one of: leftalt, rightalt".to_string()),
-        "meta" | "win" | "windows" | "super" => return Err("Ambiguous key name 'meta'/'win'/'super'. Please specify one of: leftmeta, rightmeta (or lwin, rwin, etc.)".to_string()),
+        "shift" => return Err(
+            "Ambiguous key name 'shift'. Please specify 'leftshift' or 'rightshift'.".to_string()
+        ),
+        "ctrl" | "control" => return Err(
+            "Ambiguous key name 'ctrl' or 'control'. Please specify 'leftctrl' or 'rightctrl'.".to_string()
+        ),
+        "alt" => return Err(
+            "Ambiguous key name 'alt'. Please specify 'leftalt' or 'rightalt' (or 'altgr' for Right Alt / AltGr).".to_string()
+        ),
+        "meta" | "win" | "windows" | "super" => return Err(
+            "Ambiguous key name like 'meta', 'win', 'super'. Please specify 'leftmeta' (or 'lwin', 'lsuper') or 'rightmeta' (or 'rwin', 'rsuper').".to_string()
+        ),
         _ => {} // Not an ambiguous key, proceed to main match
     }
 
     // Match against the fully normalized key name.
-    // Normalization includes: to_lowercase(), removing '_', and removing '-' for non-symbolic names.
     match normalized_key_name.as_str() {
         // Standard Keys from input-event-codes.h
         "esc" | "escape" => Ok(1),
@@ -408,35 +437,35 @@ mod tests {
     fn test_ambiguous_keys() {
         assert_eq!(
             get_keycode_from_string("shift").unwrap_err(),
-            "Ambiguous key name 'shift'. Please specify one of: leftshift, rightshift"
+            "Ambiguous key name 'shift'. Please specify 'leftshift' or 'rightshift'."
         );
         assert_eq!(
             get_keycode_from_string("SHIFT").unwrap_err(), // Test case insensitivity for ambiguous check
-            "Ambiguous key name 'shift'. Please specify one of: leftshift, rightshift"
+            "Ambiguous key name 'shift'. Please specify 'leftshift' or 'rightshift'."
         );
         assert_eq!(
             get_keycode_from_string("ctrl").unwrap_err(),
-            "Ambiguous key name 'ctrl'/'control'. Please specify one of: leftctrl, rightctrl"
+            "Ambiguous key name 'ctrl' or 'control'. Please specify 'leftctrl' or 'rightctrl'."
         );
         assert_eq!(
             get_keycode_from_string("control").unwrap_err(),
-            "Ambiguous key name 'ctrl'/'control'. Please specify one of: leftctrl, rightctrl"
+            "Ambiguous key name 'ctrl' or 'control'. Please specify 'leftctrl' or 'rightctrl'."
         );
         assert_eq!(
             get_keycode_from_string("alt").unwrap_err(),
-            "Ambiguous key name 'alt'. Please specify one of: leftalt, rightalt"
+            "Ambiguous key name 'alt'. Please specify 'leftalt' or 'rightalt' (or 'altgr' for Right Alt / AltGr)."
         );
         assert_eq!(
             get_keycode_from_string("meta").unwrap_err(),
-            "Ambiguous key name 'meta'/'win'/'super'. Please specify one of: leftmeta, rightmeta (or lwin, rwin, etc.)"
+            "Ambiguous key name like 'meta', 'win', 'super'. Please specify 'leftmeta' (or 'lwin', 'lsuper') or 'rightmeta' (or 'rwin', 'rsuper')."
         );
         assert_eq!(
             get_keycode_from_string("win").unwrap_err(),
-            "Ambiguous key name 'meta'/'win'/'super'. Please specify one of: leftmeta, rightmeta (or lwin, rwin, etc.)"
+            "Ambiguous key name like 'meta', 'win', 'super'. Please specify 'leftmeta' (or 'lwin', 'lsuper') or 'rightmeta' (or 'rwin', 'rsuper')."
         );
         assert_eq!(
             get_keycode_from_string("super").unwrap_err(),
-            "Ambiguous key name 'meta'/'win'/'super'. Please specify one of: leftmeta, rightmeta (or lwin, rwin, etc.)"
+            "Ambiguous key name like 'meta', 'win', 'super'. Please specify 'leftmeta' (or 'lwin', 'lsuper') or 'rightmeta' (or 'rwin', 'rsuper')."
         );
     }
 

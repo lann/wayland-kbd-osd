@@ -17,7 +17,7 @@ The script handles most dependencies. However, **Rust itself must be installed s
 The `install-dev-deps.sh` script should contain all requirements needed to build and test this software, including supporting scripts. If you modify project dependencies, update `install-dev-deps.sh` accordingly.
 
 **Note on Input Device Errors:**
-In environments without direct access to input devices (e.g., many CI systems), `wayland-kbd-osd` may log errors about being unable to open `/dev/input/event*` files. This is expected. You can ignore these errors unless your task relates specifically to input device handling, in which case you will need to make these files accessible by e.g. adding the current user to the 'input' group and running `newgrp input`.
+In environments without direct access to input devices (e.g., many CI systems), `wayland-kbd-osd` may log errors about being unable to open `/dev/input/event*` files. This is expected. Recent improvements to logging (e.g., in `src/event.rs`) may provide more specific details from `libinput` if permission issues are the cause (look for messages like "Permission denied when opening /dev/input/..."). You can generally ignore these errors unless your task relates specifically to input device handling, in which case you will need to make these files accessible by e.g. adding the current user to the 'input' group and running `newgrp input`.
 
 ## Running Tests
 
@@ -35,7 +35,7 @@ cargo test
 
 - Refactor proactively to improve the readability and maintainability of the code.
 - Write code with Rust idioms like RAII where appropriate.
-- Include doc comments for all functions, methods, and non-trivial type definitions.
+- Include doc comments for all `pub` functions, methods, structs, enums, and non-trivial type definitions. Consider adding comments for complex private logic as well.
 - Add tests proactively, especially for complex logic.
 - Any comments containing commentary about a change should be removed before committing.
 - If code is commented out while making changes, remove the commented out code before committing.
