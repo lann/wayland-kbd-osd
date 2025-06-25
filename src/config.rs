@@ -1,9 +1,8 @@
 // Configuration loading and related structs
 use serde::Deserialize;
-use serde_value::Value as SerdeValue;
 use std::fs;
 
-use crate::keycodes;
+use crate::keycodes::{self, KeycodeRepr};
 
 // Represents a size that can be absolute (pixels) or relative (ratio of screen)
 #[derive(Deserialize, Debug, Clone, Copy)]
@@ -122,7 +121,7 @@ pub struct KeyConfig {
     pub left: f32,
     pub top: f32,
     #[serde(alias = "keycode")]
-    pub raw_keycode: Option<SerdeValue>,
+    pub raw_keycode: Option<KeycodeRepr>,
     #[serde(skip_deserializing)]
     pub keycode: u32,
     pub rotation_degrees: Option<f32>,
@@ -260,72 +259,13 @@ pub fn load_and_process_config(config_path: &str) -> Result<AppConfig, String> {
         // If `raw_keycode` is None (i.e., the 'keycode' field is missing in TOML for this key),
         // we attempt to derive the keycode from the key's 'name' field.
         let resolved_code = match key_conf.raw_keycode.as_ref() {
-            // Case 1: Keycode is specified as a string (e.g., keycode = "enter")
-            Some(SerdeValue::String(s)) => keycodes::get_keycode_from_string(s),
-            // Case 2: Keycode is specified as an unsigned integer (u8, u16, u32, u64)
-            Some(SerdeValue::U8(i)) => Ok(*i as u32),
-            Some(SerdeValue::U16(i)) => Ok(*i as u32),
-            Some(SerdeValue::U32(i)) => Ok(*i),
-            Some(SerdeValue::U64(i)) => {
-                if *i <= u32::MAX as u64 {
-                    Ok(*i as u32)
-                } else {
-                    Err(format!(
-                        "Integer keycode {} for key '{}' is too large for a 32-bit unsigned integer (u32). Max value is {}.",
-                        i, key_conf.name, u32::MAX
-                    ))
-                }
-            }
-            // Case 3: Keycode is specified as a signed integer (i8, i16, i32, i64)
-            // We ensure it's non-negative and fits within u32.
-            Some(SerdeValue::I8(i)) => {
-                if *i >= 0 {
-                    Ok(*i as u32)
-                } else {
-                    Err(format!(
-                        "Negative keycode {} for key '{}' is invalid. Keycodes must be non-negative.",
-                        i, key_conf.name
-                    ))
-                }
-            }
-            Some(SerdeValue::I16(i)) => {
-                if *i >= 0 {
-                    Ok(*i as u32)
-                } else {
-                    Err(format!(
-                        "Negative keycode {} for key '{}' is invalid. Keycodes must be non-negative.",
-                        i, key_conf.name
-                    ))
-                }
-            }
-            Some(SerdeValue::I32(i)) => {
-                if *i >= 0 {
-                    Ok(*i as u32)
-                } else {
-                    Err(format!(
-                        "Negative keycode {} for key '{}' is invalid. Keycodes must be non-negative.",
-                        i, key_conf.name
-                    ))
-                }
-            }
-            Some(SerdeValue::I64(i)) => {
-                if *i >= 0 && *i <= u32::MAX as i64 {
-                    Ok(*i as u32)
-                } else {
-                    Err(format!(
-                        "Integer keycode {} for key '{}' is out of the valid range for a 32-bit unsigned integer (0 to {}).",
-                        i, key_conf.name, u32::MAX
-                    ))
-                }
-            }
-            // Case 4: 'keycode' field is not specified in TOML for this key.
+            // Case 1: Keycode is specified as Text (string)
+            Some(KeycodeRepr::Text(s)) => keycodes::get_keycode_from_string(s),
+            // Case 2: Keycode is specified as a Number (u32)
+            Some(KeycodeRepr::Number(n)) => Ok(*n),
+            // Case 3: 'keycode' field is not specified in TOML for this key.
             // Attempt to resolve the keycode from the key's 'name' field (e.g. name = "A" -> keycode for A).
             None => keycodes::get_keycode_from_string(&key_conf.name),
-            // Case 5: 'keycode' field has an unexpected type (e.g., boolean, array, table).
-            Some(other_type) => Err(format!(
-                "Invalid type for 'keycode' field for key '{}': expected a string or an integer, but found {:?}.",
-                key_conf.name, other_type
-            )),
         };
 
         match resolved_code {

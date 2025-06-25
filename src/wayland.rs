@@ -266,8 +266,8 @@ impl AppState {
         ((max_x - min_x).max(0.0), (max_y - min_y).max(0.0))
     }
 
-    fn prepare_drawing_surface<'a>(
-        &'a mut self,
+    fn prepare_drawing_surface(
+        &mut self,
         qh: &QueueHandle<AppState>,
         width: i32,
         height: i32,
@@ -278,7 +278,7 @@ impl AppState {
 
         if self.temp_file.is_none()
             || self.mmap.is_none()
-            || self.mmap.as_ref().map_or(true, |m| m.len() < surface_size_bytes)
+            || self.mmap.as_ref().is_none_or(|m| m.len() < surface_size_bytes)
         {
             if let Some(old_buffer) = self.buffer.take() {
                 old_buffer.destroy();
@@ -474,9 +474,8 @@ impl AppState {
         let cairo_font_face =
             CairoFontFace::create_from_ft(&ft_face).expect("Cairo FT face creation failed");
 
-        let final_background_color: (f64, f64, f64, f64);
-        if self.is_window_mode {
-            final_background_color = self.window_background_color;
+        let final_background_color = if self.is_window_mode {
+            self.window_background_color
         } else {
             let is_overlay_active = self.key_states.values().any(|&pressed| pressed);
             let bg_color_str = if is_overlay_active {
@@ -484,15 +483,15 @@ impl AppState {
             } else {
                 &self.config.overlay.background_color_inactive
             };
-            final_background_color = parse_color_string(bg_color_str).unwrap_or_else(|e| {
+            parse_color_string(bg_color_str).unwrap_or_else(|e| {
                 log::warn!(
                     "Failed to parse overlay background color string '{}': {}. Using transparent black.",
                     bg_color_str,
                     e
                 );
                 (0.0, 0.0, 0.0, 0.0)
-            });
-        }
+            })
+        };
 
         draw::paint_all_keys(
             &ctx,

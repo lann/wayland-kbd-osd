@@ -1,6 +1,15 @@
 // Based on Linux input-event-codes.h
 // Fetched from: https://raw.githubusercontent.com/torvalds/linux/master/include/uapi/linux/input-event-codes.h
 
+use serde::Deserialize;
+
+#[derive(Debug, Deserialize, Clone, PartialEq)]
+#[serde(untagged)]
+pub enum KeycodeRepr {
+    Number(u32),
+    Text(String),
+}
+
 /// Resolves a key name string (e.g., "leftshift", "a", "KP_Enter") to its Linux keycode.
 ///
 /// ## Normalization Rules:
