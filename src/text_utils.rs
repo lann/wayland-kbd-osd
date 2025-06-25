@@ -21,7 +21,7 @@ pub struct TextLayoutResult {
     pub final_text: String,
     pub final_font_size_pts: f64,
     pub truncated_chars: usize,
-    pub text_width_px: f64, // Width of the final_text at final_font_size_pts
+    // pub text_width_px: f64, // Width of the final_text at final_font_size_pts // Removed as per clippy warning (dead_code)
 }
 
 /// Common trait for text measurement providers (FreeType and Cairo).
@@ -96,12 +96,12 @@ pub fn layout_text<TMP: TextMetricsProvider>(
     let mut current_font_size_pts = params.initial_font_size_pts;
 
     // --- Font size scaling ---
-    let mut text_width_px = metrics_provider.measure_text_width(&current_text, current_font_size_pts)?;
+    let mut text_width_px_at_current_font_size = metrics_provider.measure_text_width(&current_text, current_font_size_pts)?;
 
-    while text_width_px > max_text_width_px && current_font_size_pts > min_font_size_pts {
+    while text_width_px_at_current_font_size > max_text_width_px && current_font_size_pts > min_font_size_pts {
         current_font_size_pts = (current_font_size_pts * 0.9).max(min_font_size_pts);
-        text_width_px = metrics_provider.measure_text_width(&current_text, current_font_size_pts)?;
-        if current_font_size_pts == min_font_size_pts && text_width_px > max_text_width_px {
+        text_width_px_at_current_font_size = metrics_provider.measure_text_width(&current_text, current_font_size_pts)?;
+        if current_font_size_pts == min_font_size_pts && text_width_px_at_current_font_size > max_text_width_px {
              // If even at min font size, it's too wide, break to proceed to truncation.
             break;
         }
@@ -109,12 +109,15 @@ pub fn layout_text<TMP: TextMetricsProvider>(
 
     // --- Text truncation ---
     let mut truncated_chars = 0;
-    if text_width_px > max_text_width_px {
+    // Re-check width at the potentially reduced font size before starting truncation
+    let mut text_width_px_at_current_font_size = metrics_provider.measure_text_width(&current_text, current_font_size_pts)?;
+
+    if text_width_px_at_current_font_size > max_text_width_px {
         let ellipsis = "...";
         let ellipsis_width_px = metrics_provider.measure_text_width(ellipsis, current_font_size_pts)?;
 
         // Try to fit text with ellipsis
-        while text_width_px > max_text_width_px && !current_text.is_empty() {
+        while text_width_px_at_current_font_size > max_text_width_px && !current_text.is_empty() {
             current_text.pop(); // Remove last character
             truncated_chars = original_text.chars().count() - current_text.chars().count();
 
@@ -129,31 +132,33 @@ pub fn layout_text<TMP: TextMetricsProvider>(
                     }
                     short_ellipsis
                 };
-                text_width_px = metrics_provider.measure_text_width(&current_text, current_font_size_pts)?;
+                // text_width_px_at_current_font_size = metrics_provider.measure_text_width(&current_text, current_font_size_pts)?; // No longer needed to assign here
                 break;
             }
 
             let temp_text_with_ellipsis = format!("{}{}", current_text, ellipsis);
-            text_width_px = metrics_provider.measure_text_width(&temp_text_with_ellipsis, current_font_size_pts)?;
+            text_width_px_at_current_font_size = metrics_provider.measure_text_width(&temp_text_with_ellipsis, current_font_size_pts)?;
 
             // Check if current_text + ellipsis fits
             let current_text_only_width_px = metrics_provider.measure_text_width(&current_text, current_font_size_pts)?;
             if current_text_only_width_px + ellipsis_width_px <= max_text_width_px {
                 current_text = temp_text_with_ellipsis;
-                text_width_px = metrics_provider.measure_text_width(&current_text, current_font_size_pts)?;
+                // text_width_px_at_current_font_size = metrics_provider.measure_text_width(&current_text, current_font_size_pts)?; // No longer needed to assign here
                 break;
             }
         }
 
         // If after all truncation, it's still too wide (e.g. very narrow key, ellipsis doesn't fit)
         // this could happen if ellipsis_width_px > max_text_width_px initially.
-        if text_width_px > max_text_width_px {
+        // Re-check width after potential truncation.
+        text_width_px_at_current_font_size = metrics_provider.measure_text_width(&current_text, current_font_size_pts)?;
+        if text_width_px_at_current_font_size > max_text_width_px {
              let mut short_ellipsis = ellipsis.to_string();
              while metrics_provider.measure_text_width(&short_ellipsis, current_font_size_pts)? > max_text_width_px && !short_ellipsis.is_empty() {
                  short_ellipsis.pop();
              }
              current_text = short_ellipsis;
-             text_width_px = metrics_provider.measure_text_width(&current_text, current_font_size_pts)?;
+             // text_width_px_at_current_font_size = metrics_provider.measure_text_width(&current_text, current_font_size_pts)?; // No longer needed to assign here
              // Update truncated_chars if original text is completely replaced by a (possibly shortened) ellipsis
              if current_text.len() <= ellipsis.len() && !original_text.starts_with(&current_text) {
                 truncated_chars = original_text.chars().count();
@@ -165,6 +170,6 @@ pub fn layout_text<TMP: TextMetricsProvider>(
         final_text: current_text,
         final_font_size_pts: current_font_size_pts,
         truncated_chars,
-        text_width_px,
+        // text_width_px, // Removed as per clippy warning (dead_code)
     })
 }

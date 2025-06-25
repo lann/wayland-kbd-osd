@@ -2,7 +2,6 @@
 // polling of file descriptors using the `poll` syscall.
 // It supports Wayland and libinput file descriptors.
 
-use libc;
 use std::os::unix::io::AsRawFd;
 use wayland_client::Connection;
 use input::Libinput;

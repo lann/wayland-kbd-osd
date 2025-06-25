@@ -40,6 +40,14 @@ cargo test
 - Any comments containing commentary about a change should be removed before committing.
 - If code is commented out while making changes, remove the commented out code before committing.
 
+**Linting with Clippy:**
+
+Run `cargo clippy` to check for lints and manually fix any reported issues.
+
+```bash
+cargo clippy
+```
+
 
 ## Visual Inspection with `take_screenshot.sh`
 
