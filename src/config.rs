@@ -1,7 +1,6 @@
 // Configuration loading and related structs
 use serde::Deserialize;
 use serde_value::Value as SerdeValue;
-use std::collections::HashMap;
 use std::fs;
 
 use crate::keycodes;
@@ -145,27 +144,28 @@ pub struct AppConfig {
 // Returns (r, g, b, a) tuple with values from 0.0 to 1.0
 pub fn parse_color_string(color_str: &str) -> Result<(f64, f64, f64, f64), String> {
     let s = color_str.trim_start_matches('#');
+
+    let parse_hex_component = |hex_pair: &str, component_name: &str| {
+        u8::from_str_radix(hex_pair, 16).map_err(|e| {
+            format!(
+                "Invalid hexadecimal value for {} component in color string '{}': '{}'. Error: {}",
+                component_name, color_str, hex_pair, e
+            )
+        })
+    };
+
     match s.len() {
-        6 => {
-            // RRGGBB
-            let r = u8::from_str_radix(&s[0..2], 16)
-                .map_err(|e| format!("Invalid hex for R: {}", e))?;
-            let g = u8::from_str_radix(&s[2..4], 16)
-                .map_err(|e| format!("Invalid hex for G: {}", e))?;
-            let b = u8::from_str_radix(&s[4..6], 16)
-                .map_err(|e| format!("Invalid hex for B: {}", e))?;
+        6 => { // RRGGBB
+            let r = parse_hex_component(&s[0..2], "Red (RR)")?;
+            let g = parse_hex_component(&s[2..4], "Green (GG)")?;
+            let b = parse_hex_component(&s[4..6], "Blue (BB)")?;
             Ok((r as f64 / 255.0, g as f64 / 255.0, b as f64 / 255.0, 1.0)) // Default alpha to 1.0
         }
-        8 => {
-            // RRGGBBAA
-            let r = u8::from_str_radix(&s[0..2], 16)
-                .map_err(|e| format!("Invalid hex for R: {}", e))?;
-            let g = u8::from_str_radix(&s[2..4], 16)
-                .map_err(|e| format!("Invalid hex for G: {}", e))?;
-            let b = u8::from_str_radix(&s[4..6], 16)
-                .map_err(|e| format!("Invalid hex for B: {}", e))?;
-            let a = u8::from_str_radix(&s[6..8], 16)
-                .map_err(|e| format!("Invalid hex for A: {}", e))?;
+        8 => { // RRGGBBAA
+            let r = parse_hex_component(&s[0..2], "Red (RR)")?;
+            let g = parse_hex_component(&s[2..4], "Green (GG)")?;
+            let b = parse_hex_component(&s[4..6], "Blue (BB)")?;
+            let a = parse_hex_component(&s[6..8], "Alpha (AA)")?;
             Ok((
                 r as f64 / 255.0,
                 g as f64 / 255.0,
@@ -173,33 +173,35 @@ pub fn parse_color_string(color_str: &str) -> Result<(f64, f64, f64, f64), Strin
                 a as f64 / 255.0,
             ))
         }
-        3 => {
-            // RGB
-            let r_char = s.chars().next().unwrap();
-            let g_char = s.chars().nth(1).unwrap();
-            let b_char = s.chars().nth(2).unwrap();
-            let r = u8::from_str_radix(&format!("{}{}", r_char, r_char), 16)
-                .map_err(|e| format!("Invalid hex for R: {}", e))?;
-            let g = u8::from_str_radix(&format!("{}{}", g_char, g_char), 16)
-                .map_err(|e| format!("Invalid hex for G: {}", e))?;
-            let b = u8::from_str_radix(&format!("{}{}", b_char, b_char), 16)
-                .map_err(|e| format!("Invalid hex for B: {}", e))?;
+        3 => { // RGB
+            let r_char = s.chars().next().ok_or_else(|| "Empty string after '#' for RGB color".to_string())?;
+            let g_char = s.chars().nth(1).ok_or_else(|| "Too short for G in RGB color".to_string())?;
+            let b_char = s.chars().nth(2).ok_or_else(|| "Too short for B in RGB color".to_string())?;
+
+            let r_str = format!("{}{}", r_char, r_char);
+            let g_str = format!("{}{}", g_char, g_char);
+            let b_str = format!("{}{}", b_char, b_char);
+
+            let r = parse_hex_component(&r_str, "Red (R)")?;
+            let g = parse_hex_component(&g_str, "Green (G)")?;
+            let b = parse_hex_component(&b_str, "Blue (B)")?;
             Ok((r as f64 / 255.0, g as f64 / 255.0, b as f64 / 255.0, 1.0))
         }
-        4 => {
-            // RGBA
-            let r_char = s.chars().next().unwrap();
-            let g_char = s.chars().nth(1).unwrap();
-            let b_char = s.chars().nth(2).unwrap();
-            let a_char = s.chars().nth(3).unwrap();
-            let r = u8::from_str_radix(&format!("{}{}", r_char, r_char), 16)
-                .map_err(|e| format!("Invalid hex for R: {}", e))?;
-            let g = u8::from_str_radix(&format!("{}{}", g_char, g_char), 16)
-                .map_err(|e| format!("Invalid hex for G: {}", e))?;
-            let b = u8::from_str_radix(&format!("{}{}", b_char, b_char), 16)
-                .map_err(|e| format!("Invalid hex for B: {}", e))?;
-            let a = u8::from_str_radix(&format!("{}{}", a_char, a_char), 16)
-                .map_err(|e| format!("Invalid hex for A: {}", e))?;
+        4 => { // RGBA
+            let r_char = s.chars().next().ok_or_else(|| "Empty string after '#' for RGBA color".to_string())?;
+            let g_char = s.chars().nth(1).ok_or_else(|| "Too short for G in RGBA color".to_string())?;
+            let b_char = s.chars().nth(2).ok_or_else(|| "Too short for B in RGBA color".to_string())?;
+            let a_char = s.chars().nth(3).ok_or_else(|| "Too short for A in RGBA color".to_string())?;
+
+            let r_str = format!("{}{}", r_char, r_char);
+            let g_str = format!("{}{}", g_char, g_char);
+            let b_str = format!("{}{}", b_char, b_char);
+            let a_str = format!("{}{}", a_char, a_char);
+
+            let r = parse_hex_component(&r_str, "Red (R)")?;
+            let g = parse_hex_component(&g_str, "Green (G)")?;
+            let b = parse_hex_component(&b_str, "Blue (B)")?;
+            let a = parse_hex_component(&a_str, "Alpha (A)")?;
             Ok((
                 r as f64 / 255.0,
                 g as f64 / 255.0,
@@ -208,270 +210,20 @@ pub fn parse_color_string(color_str: &str) -> Result<(f64, f64, f64, f64), Strin
             ))
         }
         _ => Err(format!(
-            "Invalid color string length for '{}'. Expected #RRGGBB, #RRGGBBAA, #RGB, or #RGBA",
-            color_str
+            "Invalid color string format for '{}'. Expected #RRGGBB, #RRGGBBAA, #RGB, or #RGBA. Length of '{}' (after #) is {}.",
+            color_str, s, s.len()
         )),
     }
 }
 
-// Default appearance values (unscaled) - also used in check_config and AppState::draw
+// Default appearance values (unscaled) - also used in AppState::draw
+// Note: check_config related usage is now in src/check.rs
 pub const DEFAULT_CORNER_RADIUS_UNSCALED: f32 = 8.0;
 pub const DEFAULT_BORDER_THICKNESS_UNSCALED: f32 = 2.0;
 pub const DEFAULT_TEXT_SIZE_UNSCALED: f32 = 18.0;
 pub const DEFAULT_ROTATION_DEGREES: f32 = 0.0;
 
-// Helper function for --check: Validate configuration
-pub fn validate_config(config: &AppConfig) -> Result<(), String> {
-    // Check for overlapping keys
-    for i in 0..config.key.len() {
-        for j in (i + 1)..config.key.len() {
-            let key1 = &config.key[i];
-            let key2 = &config.key[j];
-
-            // Basic bounding box check (ignoring rotation for simplicity in this check)
-            let k1_left = key1.left;
-            let k1_right = key1.left + key1.width;
-            let k1_top = key1.top;
-            let k1_bottom = key1.top + key1.height;
-
-            let k2_left = key2.left;
-            let k2_right = key2.left + key2.width;
-            let k2_top = key2.top;
-            let k2_bottom = key2.top + key2.height;
-
-            if k1_left < k2_right && k1_right > k2_left && k1_top < k2_bottom && k1_bottom > k2_top
-            {
-                return Err(format!(
-                    "Configuration validation error: Key '{}' (at {:.1},{:.1} size {:.1}x{:.1}) overlaps with key '{}' (at {:.1},{:.1} size {:.1}x{:.1})",
-                    key1.name, key1.left, key1.top, key1.width, key1.height,
-                    key2.name, key2.left, key2.top, key2.width, key2.height
-                ));
-            }
-        }
-    }
-
-    // Check for duplicate keycodes
-    let mut keycodes_seen = HashMap::new();
-    for key_config in &config.key {
-        if let Some(existing_key_name) = keycodes_seen.get(&key_config.keycode) {
-            return Err(format!(
-                "Configuration validation error: Duplicate keycode {} detected. Used by key '{}' and key '{}'.",
-                key_config.keycode, existing_key_name, key_config.name
-            ));
-        }
-        keycodes_seen.insert(key_config.keycode, key_config.name.clone());
-    }
-
-    // Check for invalid values (e.g. negative width/height)
-    for key_config in &config.key {
-        if key_config.width <= 0.0 {
-            return Err(format!(
-                "Configuration validation error: Key '{}' has non-positive width {:.1}.",
-                key_config.name, key_config.width
-            ));
-        }
-        if key_config.height <= 0.0 {
-            return Err(format!(
-                "Configuration validation error: Key '{}' has non-positive height {:.1}.",
-                key_config.name, key_config.height
-            ));
-        }
-        if let Some(ts) = key_config.text_size {
-            if ts <= 0.0 {
-                return Err(format!(
-                    "Configuration validation error: Key '{}' has non-positive text_size {:.1}.",
-                    key_config.name, ts
-                ));
-            }
-        }
-        if let Some(cr) = key_config.corner_radius {
-            if cr < 0.0 {
-                return Err(format!(
-                    "Configuration validation error: Key '{}' has negative corner_radius {:.1}.",
-                    key_config.name, cr
-                ));
-            }
-        }
-        if let Some(bt) = key_config.border_thickness {
-            if bt < 0.0 {
-                return Err(format!(
-                    "Configuration validation error: Key '{}' has negative border_thickness {:.1}.",
-                    key_config.name, bt
-                ));
-            }
-        }
-    }
-    Ok(())
-}
-
-pub fn print_overlay_config_for_check(config: &OverlayConfig) {
-    println!("\nOverlay Configuration:");
-    println!(
-        "  Screen:               {}",
-        config.screen.as_deref().unwrap_or("Compositor default")
-    );
-    println!("  Position:             {:?}", config.position);
-
-    let width_str = match config.size_width {
-        Some(SizeDimension::Pixels(px)) => format!("{}px", px),
-        Some(SizeDimension::Ratio(r)) => format!("{:.0}% screen", r * 100.0),
-        None => "Derived from height/layout".to_string(),
-    };
-    let height_str = match config.size_height {
-        Some(SizeDimension::Pixels(px)) => format!("{}px", px),
-        Some(SizeDimension::Ratio(r)) => format!("{:.0}% screen", r * 100.0),
-        None => "Derived from width/layout".to_string(),
-    };
-    println!("  Size Width:           {}", width_str);
-    println!("  Size Height:          {}", height_str);
-
-    println!(
-        "  Margins (T,R,B,L):    {}, {}, {}, {}",
-        config.margin_top, config.margin_right, config.margin_bottom, config.margin_left
-    );
-
-    match parse_color_string(&config.background_color_inactive) {
-        Ok((r, g, b, a)) => println!(
-            "  Background Inactive:  {} (R:{:.2} G:{:.2} B:{:.2} A:{:.2})",
-            config.background_color_inactive, r, g, b, a
-        ),
-        Err(e) => println!(
-            "  Background Inactive:  {} (Error: {})",
-            config.background_color_inactive, e
-        ),
-    }
-    match parse_color_string(&config.background_color_active) {
-        Ok((r,g,b,a)) => println!("  Background Active:    {} (R:{:.2} G:{:.2} B:{:.2} A:{:.2}) (currently unused for global bg)", config.background_color_active, r,g,b,a),
-        Err(e) => println!("  Background Active:    {} (Error: {})", config.background_color_active, e),
-    }
-    match parse_color_string(&config.default_key_background_color) {
-        Ok((r, g, b, a)) => println!(
-            "  Default Key BG:       {} (R:{:.2} G:{:.2} B:{:.2} A:{:.2})",
-            config.default_key_background_color, r, g, b, a
-        ),
-        Err(e) => println!(
-            "  Default Key BG:       {} (Error: {})",
-            config.default_key_background_color, e
-        ),
-    }
-}
-
-// Helper struct for --check: Text metrics simulation result
-pub struct TextCheckResult {
-    pub final_font_size_pts: f64,
-    pub truncated_chars: usize,
-    pub final_text: String,
-}
-
-// Helper function for --check: Simulate text scaling and truncation
-pub fn simulate_text_layout(
-    key_config: &KeyConfig,
-    ft_face: &freetype::Face,
-) -> Result<TextCheckResult, String> {
-    let original_text = key_config.name.clone();
-    let key_width = key_config.width as f64;
-    let key_height = key_config.height as f64;
-
-    let original_font_size_pts = key_config.text_size.unwrap_or(DEFAULT_TEXT_SIZE_UNSCALED) as f64;
-
-    let text_padding = (key_width * 0.1).min(key_height * 0.1).max(2.0);
-    let max_text_width_px = key_width - 2.0 * text_padding;
-
-    let min_font_size_pts = (original_font_size_pts * 0.5).max(6.0);
-
-    let mut current_text = original_text.clone();
-    let mut current_font_size_pts = original_font_size_pts;
-    let mut truncated_chars = 0;
-
-    let get_ft_text_width = |text: &str,
-                             size_pts: f64,
-                             face: &freetype::Face|
-     -> Result<f64, String> {
-        let pixel_height = size_pts.round() as u32;
-        if pixel_height == 0 {
-            return Ok(0.0);
-        }
-
-        face.set_pixel_sizes(0, pixel_height)
-            .map_err(|e| format!("FreeType set_pixel_sizes failed: {:?}", e))?;
-
-        let mut total_width = 0.0;
-        for char_code in text.chars() {
-            face.load_char(char_code as usize, freetype::face::LoadFlag::RENDER)
-                .map_err(|e| format!("FreeType load_char failed for '{}': {:?}", char_code, e))?;
-            total_width += face.glyph().advance().x as f64 / 64.0;
-        }
-        Ok(total_width)
-    };
-
-    let mut text_width_px = get_ft_text_width(&current_text, current_font_size_pts, ft_face)?;
-
-    while text_width_px > max_text_width_px && current_font_size_pts > min_font_size_pts {
-        current_font_size_pts *= 0.9;
-        if current_font_size_pts < min_font_size_pts {
-            current_font_size_pts = min_font_size_pts;
-        }
-        text_width_px = get_ft_text_width(&current_text, current_font_size_pts, ft_face)?;
-        if current_font_size_pts == min_font_size_pts && text_width_px > max_text_width_px {
-            break;
-        }
-    }
-
-    if text_width_px > max_text_width_px {
-        let ellipsis = "...";
-        let ellipsis_width_px = get_ft_text_width(ellipsis, current_font_size_pts, ft_face)?;
-
-        while text_width_px > max_text_width_px && !current_text.is_empty() {
-            current_text.pop();
-            truncated_chars = original_text.chars().count() - current_text.chars().count();
-
-            if current_text.is_empty() {
-                current_text = if ellipsis_width_px <= max_text_width_px {
-                    ellipsis.to_string()
-                } else {
-                    "".to_string()
-                };
-                text_width_px = get_ft_text_width(&current_text, current_font_size_pts, ft_face)?;
-                break;
-            }
-
-            let temp_text_with_ellipsis = format!("{}{}", current_text, ellipsis);
-            text_width_px =
-                get_ft_text_width(&temp_text_with_ellipsis, current_font_size_pts, ft_face)?;
-
-            let current_text_only_width_px =
-                get_ft_text_width(&current_text, current_font_size_pts, ft_face)?;
-            if current_text_only_width_px + ellipsis_width_px <= max_text_width_px {
-                current_text = temp_text_with_ellipsis;
-                text_width_px = get_ft_text_width(&current_text, current_font_size_pts, ft_face)?;
-                break;
-            }
-        }
-
-        if text_width_px > max_text_width_px {
-            let mut temp_ellipsis = ellipsis.to_string();
-            while get_ft_text_width(&temp_ellipsis, current_font_size_pts, ft_face)?
-                > max_text_width_px
-                && !temp_ellipsis.is_empty()
-            {
-                temp_ellipsis.pop();
-            }
-            current_text = temp_ellipsis;
-            if (current_text.starts_with(ellipsis.chars().next().unwrap_or_default())
-                && current_text.len() < ellipsis.len())
-                || current_text.is_empty()
-            {
-                truncated_chars = original_text.chars().count();
-            }
-        }
-    }
-
-    Ok(TextCheckResult {
-        final_font_size_pts: current_font_size_pts,
-        truncated_chars,
-        final_text: current_text,
-    })
-}
+// TextCheckResult was moved to text_utils.rs as TextLayoutResult
 
 pub fn load_and_process_config(config_path: &str) -> Result<AppConfig, String> {
     let config_content = fs::read_to_string(config_path)
@@ -486,21 +238,31 @@ pub fn load_and_process_config(config_path: &str) -> Result<AppConfig, String> {
 
     let mut keycode_resolution_errors = Vec::new();
     for key_conf in app_config.key.iter_mut() {
+        // Basic validation for key dimensions, moved here from main's --check logic
+        // as it's fundamental to a valid key definition before resolving keycodes.
         if key_conf.width <= 0.0 {
             keycode_resolution_errors.push(format!(
-                "Key '{}' has invalid width: {}",
+                "Key '{}' has invalid width: {}. Width must be positive.",
                 key_conf.name, key_conf.width
             ));
         }
         if key_conf.height <= 0.0 {
             keycode_resolution_errors.push(format!(
-                "Key '{}' has invalid height: {}",
+                "Key '{}' has invalid height: {}. Height must be positive.",
                 key_conf.name, key_conf.height
             ));
         }
 
+        // Resolve keycode:
+        // The `raw_keycode` field in `KeyConfig` is an Option<SerdeValue>.
+        // This allows the TOML to specify keycodes as strings (e.g., "a", "leftshift")
+        // or as numbers (e.g., 30, 42).
+        // If `raw_keycode` is None (i.e., the 'keycode' field is missing in TOML for this key),
+        // we attempt to derive the keycode from the key's 'name' field.
         let resolved_code = match key_conf.raw_keycode.as_ref() {
+            // Case 1: Keycode is specified as a string (e.g., keycode = "enter")
             Some(SerdeValue::String(s)) => keycodes::get_keycode_from_string(s),
+            // Case 2: Keycode is specified as an unsigned integer (u8, u16, u32, u64)
             Some(SerdeValue::U8(i)) => Ok(*i as u32),
             Some(SerdeValue::U16(i)) => Ok(*i as u32),
             Some(SerdeValue::U32(i)) => Ok(*i),
@@ -509,17 +271,19 @@ pub fn load_and_process_config(config_path: &str) -> Result<AppConfig, String> {
                     Ok(*i as u32)
                 } else {
                     Err(format!(
-                        "Integer keycode {} for key '{}' is too large for u32.",
-                        i, key_conf.name
+                        "Integer keycode {} for key '{}' is too large for a 32-bit unsigned integer (u32). Max value is {}.",
+                        i, key_conf.name, u32::MAX
                     ))
                 }
             }
+            // Case 3: Keycode is specified as a signed integer (i8, i16, i32, i64)
+            // We ensure it's non-negative and fits within u32.
             Some(SerdeValue::I8(i)) => {
                 if *i >= 0 {
                     Ok(*i as u32)
                 } else {
                     Err(format!(
-                        "Negative keycode {} for key '{}' is invalid.",
+                        "Negative keycode {} for key '{}' is invalid. Keycodes must be non-negative.",
                         i, key_conf.name
                     ))
                 }
@@ -529,7 +293,7 @@ pub fn load_and_process_config(config_path: &str) -> Result<AppConfig, String> {
                     Ok(*i as u32)
                 } else {
                     Err(format!(
-                        "Negative keycode {} for key '{}' is invalid.",
+                        "Negative keycode {} for key '{}' is invalid. Keycodes must be non-negative.",
                         i, key_conf.name
                     ))
                 }
@@ -539,7 +303,7 @@ pub fn load_and_process_config(config_path: &str) -> Result<AppConfig, String> {
                     Ok(*i as u32)
                 } else {
                     Err(format!(
-                        "Negative keycode {} for key '{}' is invalid.",
+                        "Negative keycode {} for key '{}' is invalid. Keycodes must be non-negative.",
                         i, key_conf.name
                     ))
                 }
@@ -549,20 +313,23 @@ pub fn load_and_process_config(config_path: &str) -> Result<AppConfig, String> {
                     Ok(*i as u32)
                 } else {
                     Err(format!(
-                        "Integer keycode {} for key '{}' is out of valid u32 range.",
-                        i, key_conf.name
+                        "Integer keycode {} for key '{}' is out of the valid range for a 32-bit unsigned integer (0 to {}).",
+                        i, key_conf.name, u32::MAX
                     ))
                 }
             }
+            // Case 4: 'keycode' field is not specified in TOML for this key.
+            // Attempt to resolve the keycode from the key's 'name' field (e.g. name = "A" -> keycode for A).
             None => keycodes::get_keycode_from_string(&key_conf.name),
+            // Case 5: 'keycode' field has an unexpected type (e.g., boolean, array, table).
             Some(other_type) => Err(format!(
-                "Invalid type for keycode field for key '{}': expected string or integer, got {:?}",
+                "Invalid type for 'keycode' field for key '{}': expected a string or an integer, but found {:?}.",
                 key_conf.name, other_type
             )),
         };
 
         match resolved_code {
-            Ok(code) => key_conf.keycode = code,
+            Ok(code) => key_conf.keycode = code, // Store the successfully resolved u32 keycode.
             Err(e) => {
                 let error_msg = if key_conf.raw_keycode.is_none() {
                     format!(
