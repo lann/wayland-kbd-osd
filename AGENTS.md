@@ -31,6 +31,16 @@ The startup test (`tests::test_startup_no_crash`) requires a Wayland environment
 cargo test
 ```
 
+## Code Style Guide
+
+- Refactor proactively to improve the readability and maintainability of the code.
+- Write code with Rust idioms like RAII where appropriate.
+- Include doc comments for all functions, methods, and non-trivial type definitions.
+- Add tests proactively, especially for complex logic.
+- Any comments containing commentary about a change should be removed before committing.
+- If code is commented out while making changes, remove the commented out code before committing.
+
+
 ## Visual Inspection with `take_screenshot.sh`
 
 **Important:** If you make any changes to the visual appearance of the OSD (e.g., key layout, colors, fonts, window size), you **must** regenerate the `screenshot.png` by running `./take_screenshot.sh` and commit the updated screenshot along with your code changes. This ensures the screenshot accurately reflects the current state of the application.
