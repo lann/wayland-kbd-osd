@@ -1,23 +1,39 @@
 // Configuration loading and related structs
+
+//! This module defines the data structures for application configuration,
+//! loaded from a TOML file. It includes parsing for colors, sizes,
+//! and key definitions, along with default values and validation.
+
 use serde::Deserialize;
 use std::fs;
 
 use crate::keycodes::{self, KeycodeRepr};
 
-// Represents a size that can be absolute (pixels) or relative (ratio of screen)
+/// Represents a size dimension that can be specified in absolute pixels or as a ratio.
+///
+/// Used in TOML configuration for `size_width` and `size_height` of the overlay.
+/// It can be deserialized from an integer (interpreted as pixels) or a float
+/// (interpreted as a ratio, e.g., 0.5 for 50%).
 #[derive(Deserialize, Debug, Clone, Copy)]
-#[serde(untagged)] // Allows parsing "100" as pixels(100) or "0.5" as ratio(0.5)
+#[serde(untagged)] // Allows parsing "100" as Pixels(100) or "0.5" as Ratio(0.5)
 pub enum SizeDimension {
+    /// Size in absolute pixels.
     Pixels(u32),
+    /// Size as a ratio (e.g., of screen width/height).
     Ratio(f32),
 }
 
-// Enum for specifying overlay position
+/// Enum for specifying the anchor position of the overlay on the screen.
+///
+/// Used in TOML as `overlay.position`.
 #[derive(Deserialize, Debug, Clone, PartialEq)]
 #[serde(rename_all = "kebab-case")]
 pub enum OverlayPosition {
+    /// Top edge, centered horizontally by default unless combined with Left/Right.
     Top,
+    /// Bottom edge, centered horizontally by default unless combined with Left/Right.
     Bottom,
+    /// Left edge, centered vertically by default unless combined with Top/Bottom.
     Left,
     Right,
     Center,
@@ -27,66 +43,98 @@ pub enum OverlayPosition {
     BottomLeft,
     BottomCenter,
     BottomRight,
+    /// Center vertically, aligned to the left edge.
     CenterLeft,
+    /// Center vertically, aligned to the right edge.
     CenterRight,
 }
 
+/// Configuration for the OSD overlay window.
+///
+/// Defines properties like target screen, position, size, margins,
+/// and default colors for various elements.
 #[derive(Deserialize, Debug, Clone)]
 pub struct OverlayConfig {
+    /// Optional identifier for the target screen (e.g., "DP-1", "0").
+    /// If `None`, the compositor chooses the screen.
     #[serde(default)]
     pub screen: Option<String>,
+    /// Position of the overlay on the screen.
     #[serde(default = "default_overlay_position")]
     pub position: OverlayPosition,
+    /// Optional width of the overlay. Can be pixels or ratio.
     pub size_width: Option<SizeDimension>,
+    /// Optional height of the overlay. Can be pixels or ratio.
     pub size_height: Option<SizeDimension>,
+    /// Top margin in pixels.
     #[serde(default = "default_overlay_margin")]
     pub margin_top: i32,
+    /// Right margin in pixels.
     #[serde(default = "default_overlay_margin")]
     pub margin_right: i32,
+    /// Bottom margin in pixels.
     #[serde(default = "default_overlay_margin")]
     pub margin_bottom: i32,
+    /// Left margin in pixels.
     #[serde(default = "default_overlay_margin")]
     pub margin_left: i32,
+    /// Background color of the OSD when no keys are pressed (e.g., fully transparent).
     #[serde(default = "default_background_color_inactive")]
     pub background_color_inactive: String,
+    /// Background color of the OSD when one or more keys are pressed.
+    /// (Currently unused for global background, key-specific active colors are used).
     #[serde(default = "default_background_color_active")]
     pub background_color_active: String,
+    /// Default background color for keys in their normal (inactive) state.
     #[serde(default = "default_key_background_color_string")]
     pub default_key_background_color: String,
+    /// Default text color for key labels.
     #[serde(default = "default_key_text_color_string")]
     pub default_key_text_color: String,
+    /// Default color for key outlines/borders.
     #[serde(default = "default_key_outline_color_string")]
     pub default_key_outline_color: String,
+    /// Default background color for keys when they are active (pressed).
     #[serde(default = "default_active_key_background_color_string")]
     pub active_key_background_color: String,
+    /// Default text color for key labels when they are active (pressed).
     #[serde(default = "default_active_key_text_color_string")]
     pub active_key_text_color: String,
 }
 
+/// Returns the default `OverlayPosition` (`BottomCenter`).
 fn default_overlay_position() -> OverlayPosition {
     OverlayPosition::BottomCenter
 }
+/// Returns the default margin value (`0`).
 fn default_overlay_margin() -> i32 {
     0
 }
+/// Returns the default inactive background color string (`"#00000000"`).
 fn default_background_color_inactive() -> String {
     "#00000000".to_string()
 }
+/// Returns the default active background color string (`"#A0A0A0D0"`).
 fn default_background_color_active() -> String {
     "#A0A0A0D0".to_string()
 }
+/// Returns the default key background color string (`"#4D4D4D80"`).
 pub fn default_key_background_color_string() -> String {
     "#4D4D4D80".to_string()
 }
+/// Returns the default key text color string (`"#B3B3B3CC"`).
 fn default_key_text_color_string() -> String {
     "#B3B3B3CC".to_string()
 }
+/// Returns the default key outline color string (`"#B3B3B3CC"`).
 fn default_key_outline_color_string() -> String {
     "#B3B3B3CC".to_string()
 }
+/// Returns the default active key background color string (`"#A0A0F0FF"`).
 fn default_active_key_background_color_string() -> String {
     "#A0A0F0FF".to_string()
 }
+/// Returns the default active key text color string (same as normal text color).
 fn default_active_key_text_color_string() -> String {
     default_key_text_color_string()
 }
@@ -113,34 +161,73 @@ impl Default for OverlayConfig {
     }
 }
 
+/// Configuration for a single key displayed on the OSD.
+///
+/// Defines the key's appearance (name, dimensions, position, colors) and
+/// its corresponding input keycode.
 #[derive(Deserialize, Debug, Clone)]
 pub struct KeyConfig {
+    /// Display name or label for the key (e.g., "A", "Shift").
     pub name: String,
+    /// Width of the key in abstract layout units.
     pub width: f32,
+    /// Height of the key in abstract layout units.
     pub height: f32,
+    /// X-coordinate of the top-left corner in abstract layout units.
     pub left: f32,
+    /// Y-coordinate of the top-left corner in abstract layout units.
     pub top: f32,
+    /// Raw keycode representation from TOML (string or number).
+    /// This is processed into the `keycode` field.
     #[serde(alias = "keycode")]
     pub raw_keycode: Option<KeycodeRepr>,
+    /// Resolved numerical keycode (e.g., from `linux/input-event-codes.h`).
+    /// This field is populated by `load_and_process_config`.
     #[serde(skip_deserializing)]
     pub keycode: u32,
+    /// Optional rotation of the key in degrees.
     pub rotation_degrees: Option<f32>,
+    /// Optional custom text size for this key (unscaled points).
     pub text_size: Option<f32>,
+    /// Optional custom corner radius for this key (unscaled).
     pub corner_radius: Option<f32>,
+    /// Optional custom border thickness for this key (unscaled).
     pub border_thickness: Option<f32>,
+    /// Optional custom background color string for this key.
     pub background_color: Option<String>,
 }
 
+/// Root structure for the application configuration.
+///
+/// Contains a list of `KeyConfig` definitions and an `OverlayConfig`.
 #[derive(Deserialize, Debug, Clone)]
 pub struct AppConfig {
+    /// Vector of key configurations.
     #[serde(default)]
     pub key: Vec<KeyConfig>,
+    /// Configuration for the overlay window.
     #[serde(default)]
     pub overlay: OverlayConfig,
 }
 
-// Helper function to parse color string like "#RRGGBBAA" or "#RGB"
-// Returns (r, g, b, a) tuple with values from 0.0 to 1.0
+/// Parses a color string into a tuple of (r, g, b, a) components.
+///
+/// Supports formats:
+/// - `"#RRGGBB"` (e.g., `"#FF0000"` for red)
+/// - `"#RRGGBBAA"` (e.g., `"#FF000080"` for semi-transparent red)
+/// - `"#RGB"` (e.g., `"#F00"` for red, equivalent to `"#FF0000"`)
+/// - `"#RGBA"` (e.g., `"#F008"` for semi-transparent red, equivalent to `"#FF000088"`)
+///
+/// Color components are returned as `f64` values between 0.0 and 1.0.
+///
+/// # Arguments
+///
+/// * `color_str` - The color string to parse.
+///
+/// # Returns
+///
+/// * `Ok((f64, f64, f64, f64))` representing (r, g, b, a).
+/// * `Err(String)` if the color string is invalid.
 pub fn parse_color_string(color_str: &str) -> Result<(f64, f64, f64, f64), String> {
     let s = color_str.trim_start_matches('#');
 
@@ -215,15 +302,33 @@ pub fn parse_color_string(color_str: &str) -> Result<(f64, f64, f64, f64), Strin
     }
 }
 
-// Default appearance values (unscaled) - also used in AppState::draw
-// Note: check_config related usage is now in src/check.rs
+/// Default corner radius for keys, in unscaled layout units.
 pub const DEFAULT_CORNER_RADIUS_UNSCALED: f32 = 8.0;
+/// Default border thickness for keys, in unscaled layout units.
 pub const DEFAULT_BORDER_THICKNESS_UNSCALED: f32 = 2.0;
+/// Default text size for key labels, in unscaled points.
 pub const DEFAULT_TEXT_SIZE_UNSCALED: f32 = 18.0;
+/// Default rotation for keys, in degrees.
 pub const DEFAULT_ROTATION_DEGREES: f32 = 0.0;
 
-// TextCheckResult was moved to text_utils.rs as TextLayoutResult
-
+/// Loads and processes the application configuration from a TOML file.
+///
+/// This function reads the specified TOML file, deserializes it into an
+/// `AppConfig` struct, and then processes each `KeyConfig` to:
+/// 1. Validate that key width and height are positive.
+/// 2. Resolve the `raw_keycode` (which can be a string name or a number from TOML)
+///    into a numerical `keycode`. If `raw_keycode` is not specified, it attempts
+///    to derive the keycode from the key's `name` field.
+///
+/// # Arguments
+///
+/// * `config_path` - Path to the TOML configuration file.
+///
+/// # Returns
+///
+/// * `Ok(AppConfig)` if loading and processing are successful.
+/// * `Err(String)` with a descriptive error message if any part of the process fails
+///   (file reading, TOML parsing, key validation, or keycode resolution).
 pub fn load_and_process_config(config_path: &str) -> Result<AppConfig, String> {
     let config_content = fs::read_to_string(config_path)
         .map_err(|e| format!("Failed to read configuration file '{}': {}", config_path, e))?;
