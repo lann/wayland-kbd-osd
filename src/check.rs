@@ -1,11 +1,29 @@
 // src/check.rs
 
+//! This module implements the `--check` functionality for the application.
+//! It validates the configuration file, simulates text layout for keys,
+//! and prints diagnostic information about the parsed configuration.
+
 use crate::config::{AppConfig, KeyConfig, OverlayConfig, DEFAULT_TEXT_SIZE_UNSCALED};
-use crate::text_utils::{layout_text, TextLayoutResult, TextLayoutParams}; // Removed CairoMetricsProvider
+use crate::text_utils::{layout_text, TextLayoutResult, TextLayoutParams};
 use cairo::{Context as CairoContext, FontFace as CairoFontFace, ImageSurface, Format};
 use std::collections::HashMap;
 
-// Helper function for --check: Validate configuration
+/// Validates the application configuration for common issues.
+///
+/// Checks for:
+/// - Overlapping keys (basic bounding box check, ignoring rotation).
+/// - Duplicate keycodes.
+/// - Invalid values like non-positive width/height for keys, or negative text/border/radius values.
+///
+/// # Arguments
+///
+/// * `config` - A reference to the `AppConfig` to validate.
+///
+/// # Returns
+///
+/// * `Ok(())` if the configuration passes all checks.
+/// * `Err(String)` with a descriptive error message if validation fails.
 pub fn validate_config(config: &AppConfig) -> Result<(), String> {
     // Check for overlapping keys
     for i in 0..config.key.len() {
@@ -89,6 +107,14 @@ pub fn validate_config(config: &AppConfig) -> Result<(), String> {
     Ok(())
 }
 
+/// Prints a summary of the `OverlayConfig` to standard output.
+///
+/// This function is used by the `--check` command to display overlay-related
+/// configuration values in a human-readable format, including parsed color values.
+///
+/// # Arguments
+///
+/// * `config` - A reference to the `OverlayConfig` to print.
 pub fn print_overlay_config_for_check(config: &OverlayConfig) {
     println!("\nOverlay Configuration:");
     println!(
@@ -141,7 +167,22 @@ pub fn print_overlay_config_for_check(config: &OverlayConfig) {
     }
 }
 
-// Helper function for --check: Simulate text scaling and truncation using the shared utility
+/// Simulates text layout for a given key using a Cairo context.
+///
+/// This function utilizes `crate::text_utils::layout_text` to determine how
+/// a key's label would be scaled and truncated to fit its defined dimensions.
+/// It's used by the `--check` command to provide feedback on text rendering.
+///
+/// # Arguments
+///
+/// * `key_config` - A reference to the `KeyConfig` for the key.
+/// * `cairo_ctx` - A reference to a Cairo `Context` initialized with the
+///   appropriate font face.
+///
+/// # Returns
+///
+/// * `Ok(TextLayoutResult)` containing the final text, font size, and truncation info.
+/// * `Err(String)` if text layout simulation fails.
 pub fn simulate_text_layout_for_check(
     key_config: &KeyConfig,
     cairo_ctx: &CairoContext,
@@ -161,6 +202,21 @@ pub fn simulate_text_layout_for_check(
     layout_text(&layout_params, cairo_ctx)
 }
 
+/// Runs the configuration check process.
+///
+/// This is the main entry point for the `--check` command. It performs:
+/// 1. Basic configuration validation (`validate_config`).
+/// 2. Sets up a dummy Cairo context with the default font.
+/// 3. Iterates through each key, simulating text layout (`simulate_text_layout_for_check`)
+///    and printing information about its dimensions, keycode, and how its label fits.
+/// 4. Prints the overlay configuration details (`print_overlay_config_for_check`).
+///
+/// Exits with status code 0 on success, or 1 if errors are found or setup fails.
+///
+/// # Arguments
+///
+/// * `config_path` - The path to the configuration file being checked (for display purposes).
+/// * `app_config` - A reference to the loaded `AppConfig`.
 pub fn run_check(config_path: &str, app_config: &AppConfig) {
     println!(
         "Performing configuration check for '{}'...",
