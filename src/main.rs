@@ -3,7 +3,7 @@ use wayland_client::Connection;
 
 // Standard Library Imports
 use std::io;
-use std::os::unix::io::{AsRawFd as _, RawFd}; // Used in main loop
+// RawFd and AsRawFd are no longer directly used in main after FdPoller changes
 use std::process; // Used in main loop for poll error
 
 // Crate-specific modules
@@ -11,6 +11,7 @@ mod config;
 mod draw; // Not directly used in main, but AppState::draw calls it
 mod event;
 mod keycodes;
+mod poll_fds; // Added new module
 mod wayland;
 
 // External Crate Imports
@@ -30,6 +31,7 @@ use event::MyLibinputInterface;
 // handle_libinput_events is called via event::handle_libinput_events
 // handle_wayland_events is called via wayland::handle_wayland_events
 use wayland::AppState;
+use crate::poll_fds::{FdPoller, PollEvent, PollError, FdPollerCreationError}; // Using the new polling module
 
 // Protocol imports for main function logic (surface creation, layer shell)
 use wayland_client::backend::WaylandError;
@@ -454,34 +456,15 @@ fn main() {
 
     log::info!("Entering main event loop.");
 
-    let wayland_raw_fd: RawFd = match conn.prepare_read() {
-        Ok(guard) => guard.connection_fd().as_raw_fd(),
-        Err(e) => {
-            log::error!(
-                "Failed to prepare_read Wayland connection before starting event loop: {}",
-                e
-            );
+    let mut fd_poller = match FdPoller::new(&conn, app_state.input_context.as_ref()) {
+        Ok(poller) => poller,
+        Err(FdPollerCreationError::WaylandConnection(e)) => {
+            log::error!("Failed to create FdPoller due to Wayland connection error: {}. Exiting.", e);
             process::exit(1);
         }
     };
 
-    let mut fds: Vec<libc::pollfd> = Vec::new();
-    fds.push(libc::pollfd {
-        fd: wayland_raw_fd,
-        events: libc::POLLIN,
-        revents: 0,
-    });
-    const WAYLAND_FD_IDX: usize = 0;
-
-    let mut libinput_fd_idx_opt: Option<usize> = None;
-    if let Some(ref context) = app_state.input_context {
-        let libinput_raw_fd: RawFd = context.as_raw_fd();
-        fds.push(libc::pollfd {
-            fd: libinput_raw_fd,
-            events: libc::POLLIN,
-            revents: 0,
-        });
-        libinput_fd_idx_opt = Some(fds.len() - 1);
+    if app_state.input_context.is_some() {
         log_if_input_device_access_denied(&app_state.config, true);
     } else {
         log_if_input_device_access_denied(&app_state.config, false);
@@ -491,61 +474,64 @@ fn main() {
     }
 
     let poll_timeout_ms = 33;
+    let mut libinput_active = app_state.input_context.is_some();
 
     while app_state.running {
-        for item in fds.iter_mut() {
-            item.revents = 0;
-        }
+        match fd_poller.poll(poll_timeout_ms) {
+            Ok(events) => {
+                for event_item in events { // Renamed to avoid conflict with crate::event
+                    match event_item {
+                        PollEvent::WaylandReady => {
+                            if wayland::handle_wayland_events(&conn, &mut event_queue, &mut app_state).is_err() {
+                                app_state.running = false;
+                                break;
+                            }
+                        }
+                        PollEvent::LibinputReady => {
+                            if libinput_active {
+                                event::handle_libinput_events(&mut app_state);
+                            }
+                        }
+                        PollEvent::WaylandError => {
+                            log::error!("Wayland FD error/hangup reported by FdPoller. Exiting.");
+                            app_state.running = false;
+                            break;
+                        }
+                        PollEvent::LibinputError => {
+                            log::error!("Libinput FD error/hangup reported by FdPoller. Input monitoring will stop.");
+                            if let Some(ref mut context) = app_state.input_context {
+                                let _ = context.dispatch(); // Attempt to clear pending
+                            }
+                            app_state.input_context = None;
 
-        let ret =
-            unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, poll_timeout_ms) };
-
-        if ret < 0 {
-            let errno = io::Error::last_os_error().raw_os_error().unwrap_or(0);
-            if errno == libc::EINTR {
+                            // Recreate FdPoller without libinput
+                            match FdPoller::new(&conn, None) {
+                                Ok(poller) => fd_poller = poller,
+                                Err(FdPollerCreationError::WaylandConnection(e)) => {
+                                    log::error!("Failed to re-create FdPoller after libinput error: {}. Exiting.", e);
+                                    app_state.running = false;
+                                    break;
+                                }
+                            }
+                            libinput_active = false;
+                            log::warn!("Libinput context removed due to FD error. Key press/release events will no longer be monitored.");
+                        }
+                        PollEvent::Timeout => {
+                            // Timeout is fine
+                        }
+                    }
+                    if !app_state.running { // Check if an event handler set running to false
+                        break;
+                    }
+                }
+            }
+            Err(PollError::Interrupted) => {
+                // EINTR, just continue
                 continue;
             }
-            log::error!("libc::poll error: {}", io::Error::last_os_error());
-            app_state.running = false;
-            break;
-        } else if ret == 0 {
-            // Timeout
-        } else {
-            if (fds[WAYLAND_FD_IDX].revents & libc::POLLIN) != 0
-                && wayland::handle_wayland_events(&conn, &mut event_queue, &mut app_state).is_err()
-            {
-                break;
-            }
-            if (fds[WAYLAND_FD_IDX].revents & (libc::POLLERR | libc::POLLHUP)) != 0 {
-                log::error!("Wayland FD error/hangup (POLLERR/POLLHUP). Exiting.");
+            Err(PollError::Other(errno)) => {
+                log::error!("FdPoller returned error: {} (errno {}). Exiting.", io::Error::from_raw_os_error(errno), errno);
                 app_state.running = false;
-            }
-
-            if let Some(libinput_idx) = libinput_fd_idx_opt {
-                if app_state.running && (fds[libinput_idx].revents & libc::POLLIN) != 0 {
-                    event::handle_libinput_events(&mut app_state);
-                }
-                if app_state.running
-                    && (fds[libinput_idx].revents & (libc::POLLERR | libc::POLLHUP)) != 0
-                {
-                    log::error!(
-                        "Libinput FD error/hangup (POLLERR/POLLHUP). Input monitoring might stop."
-                    );
-                    if let Some(ref mut context) = app_state.input_context {
-                        let _ = context.dispatch();
-                    }
-                    app_state.input_context = None;
-
-                    if let Some(idx_to_remove) = fds
-                        .iter()
-                        .position(|pollfd| pollfd.fd == fds[libinput_idx].fd)
-                    {
-                        fds.remove(idx_to_remove);
-                    }
-                    libinput_fd_idx_opt = None;
-
-                    log::warn!("Libinput context removed due to FD error. Key press/release events will no longer be monitored.");
-                }
             }
         }
 
