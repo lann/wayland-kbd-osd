@@ -1,6 +1,6 @@
 // Drawing the keyboard
 
-use crate::text_utils::{layout_text, CairoMetricsProvider, TextLayoutParams};
+use crate::text_utils::{layout_text, TextLayoutParams}; // Removed CairoMetricsProvider
 use cairo::{Context, FontFace as CairoFontFace};
 
 // Struct to hold key properties for drawing (calculated from KeyConfig and AppState)
@@ -112,9 +112,9 @@ pub fn draw_single_key_cairo(ctx: &Context, key: &KeyDisplay) {
         padding_factor: 0.1,           // Example: 10% padding
         min_padding_abs: 2.0,          // Example: absolute minimum 2px padding
     };
-    let cairo_metrics_provider = CairoMetricsProvider { cairo_ctx: ctx };
 
-    match layout_text(&text_layout_params, &cairo_metrics_provider) {
+    // Pass the context directly to layout_text
+    match layout_text(&text_layout_params, ctx) {
         Ok(layout_result) => {
             // Font face is set once before calling paint_all_keys (or should be set before this function)
             ctx.set_font_size(layout_result.final_font_size_pts);

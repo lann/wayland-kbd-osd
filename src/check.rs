@@ -1,8 +1,8 @@
 // src/check.rs
 
 use crate::config::{AppConfig, KeyConfig, OverlayConfig, DEFAULT_TEXT_SIZE_UNSCALED};
-use crate::text_utils::{layout_text, FreeTypeMetricsProvider, TextLayoutResult, TextLayoutParams};
-use freetype::Library as FreeTypeLibrary;
+use crate::text_utils::{layout_text, TextLayoutResult, TextLayoutParams}; // Removed CairoMetricsProvider
+use cairo::{Context as CairoContext, FontFace as CairoFontFace, ImageSurface, Format};
 use std::collections::HashMap;
 
 // Helper function for --check: Validate configuration
@@ -144,21 +144,21 @@ pub fn print_overlay_config_for_check(config: &OverlayConfig) {
 // Helper function for --check: Simulate text scaling and truncation using the shared utility
 pub fn simulate_text_layout_for_check(
     key_config: &KeyConfig,
-    ft_face: &freetype::Face,
+    cairo_ctx: &CairoContext,
 ) -> Result<TextLayoutResult, String> {
     let layout_params = TextLayoutParams {
         text: &key_config.name,
         key_width_px: key_config.width as f64,
         key_height_px: key_config.height as f64,
         initial_font_size_pts: key_config.text_size.unwrap_or(DEFAULT_TEXT_SIZE_UNSCALED) as f64,
-        min_font_size_pts_factor: 0.5, // Consistent with draw.rs defaults
-        min_font_size_pts_abs: 6.0,    // Consistent with draw.rs defaults
-        padding_factor: 0.1,           // Consistent with draw.rs defaults
-        min_padding_abs: 2.0,          // Consistent with draw.rs defaults
+        min_font_size_pts_factor: 0.5,
+        min_font_size_pts_abs: 6.0,
+        padding_factor: 0.1,
+        min_padding_abs: 2.0,
     };
 
-    let ft_metrics_provider = FreeTypeMetricsProvider { ft_face };
-    layout_text(&layout_params, &ft_metrics_provider)
+    // Pass the context directly to layout_text
+    layout_text(&layout_params, cairo_ctx)
 }
 
 pub fn run_check(config_path: &str, app_config: &AppConfig) {
@@ -174,23 +174,34 @@ pub fn run_check(config_path: &str, app_config: &AppConfig) {
         println!("Basic validation (overlaps, duplicates, positive dimensions) passed.");
     }
 
-    let font_data: &[u8] = include_bytes!("../default-font/DejaVuSansMono.ttf");
-    let ft_library = match FreeTypeLibrary::init() {
-        Ok(lib) => lib,
-        Err(e) => {
-            eprintln!("Failed to initialize FreeType library for --check: {:?}", e);
-            std::process::exit(1);
-        }
-    };
-    let ft_face = match ft_library.new_memory_face(font_data.to_vec(), 0) {
-        Ok(face) => face,
-        Err(e) => {
-            eprintln!("Failed to load font for --check: {:?}", e);
-            std::process::exit(1);
-        }
-    };
+    let surface = ImageSurface::create(Format::A1, 1, 1)
+        .map_err(|e| format!("Failed to create Cairo ImageSurface for --check: {:?}", e));
+    if surface.is_err() {
+        eprintln!("{}", surface.err().unwrap());
+        std::process::exit(1);
+    }
+    let surface = surface.unwrap();
 
-    println!("\nKey Information (Layout from TOML, Text metrics simulated):");
+    let cairo_ctx = CairoContext::new(&surface)
+        .map_err(|e| format!("Failed to create Cairo Context for --check: {:?}", e));
+    if cairo_ctx.is_err() {
+        eprintln!("{}", cairo_ctx.err().unwrap());
+        std::process::exit(1);
+    }
+    let cairo_ctx = cairo_ctx.unwrap();
+
+    let font_data: &[u8] = include_bytes!("../default-font/DejaVuSansMono.ttf");
+    // Create a FontFace from the embedded font data using FreeType, then bridge to Cairo.
+    // This is necessary because cairo-rs (0.19) doesn't provide a direct "font_face_create_from_data"
+    // without an existing FreeType face object when using its FreeType backend.
+    // The `freetype-rs` crate is used here as a loader for the `cairo::FontFace`.
+    let ft_library = freetype::Library::init().expect("FT init for cairo font face in check");
+    let ft_face = ft_library.new_memory_face(font_data.to_vec(), 0).expect("FT face for cairo font face in check");
+    let cairo_font_face = CairoFontFace::create_from_ft(&ft_face).expect("Cairo FT face creation for check");
+
+    cairo_ctx.set_font_face(&cairo_font_face);
+
+    println!("\nKey Information (Layout from TOML, Text metrics simulated with Cairo):");
     println!(
         "{:<20} | {:<25} | {:<10} | {:<10} | {:<20}",
         "Label (Name)", "Bounding Box (L,T,R,B)", "Keycode", "Font Scale", "Truncated Label"
@@ -212,8 +223,8 @@ pub fn run_check(config_path: &str, app_config: &AppConfig) {
             .text_size
             .unwrap_or(DEFAULT_TEXT_SIZE_UNSCALED) as f64;
 
-            match simulate_text_layout_for_check(key_config_item, &ft_face) { // Updated function call
-                Ok(layout_result) => { // Updated variable name
+            match simulate_text_layout_for_check(key_config_item, &cairo_ctx) {
+                Ok(layout_result) => {
                 let font_scale = if initial_font_size > 0.0 {
                         layout_result.final_font_size_pts / initial_font_size
                 } else {
@@ -239,7 +250,7 @@ pub fn run_check(config_path: &str, app_config: &AppConfig) {
             }
             Err(e) => {
                 println!(
-                    "{:<20} | {:<25} | {:<10} | {:<10.2} | Error simulating text: {} ",
+                    "{:<20} | {:<25} | {:<10} | {:<10.2} | Error simulating text with Cairo: {} ",
                     key_config_item.name, bbox_str, key_config_item.keycode, 1.0, e
                 );
             }
